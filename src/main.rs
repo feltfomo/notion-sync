@@ -1,0 +1,124 @@
+//! Daemon entrypoint. Boots the shared API client, opens state.db, runs a startup
+//! reconciliation pass, then runs the watcher and poller concurrently until SIGTERM.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use tokio::sync::{watch, Mutex};
+use tracing::{error, info};
+use tracing_subscriber::EnvFilter;
+
+use notion_sync::api::{NotionClient, RateLimiter};
+use notion_sync::config::Config;
+use notion_sync::state::State;
+use notion_sync::sync::{poller, reconcile, watcher, Engine};
+
+#[tokio::main]
+async fn main() {
+    // journald-friendly: no ANSI, structured fields. RUST_LOG overrides level.
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_ansi(false)
+        .with_target(false)
+        .init();
+
+    if let Err(e) = run().await {
+        error!(error = %e, "fatal");
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<(), String> {
+    let config_path = parse_config_arg();
+    let cfg = Config::load(&config_path).map_err(|e| e.to_string())?;
+    info!(local_root = %cfg.local_root.display(), parent = %cfg.parent_page_id, "loaded config");
+
+    // Shared token bucket: the watcher and poller draw from the SAME limiter.
+    let limiter = Arc::new(RateLimiter::notion_default());
+    let api = Arc::new(
+        NotionClient::new(cfg.token.clone(), cfg.notion_version.clone(), limiter)
+            .map_err(|e| e.to_string())?,
+    );
+
+    // Identify ourselves once for echo-loop suppression.
+    let bot_user_id = api.whoami().await.map_err(|e| {
+        format!("failed GET /v1/users/me (token valid?): {e}")
+    })?;
+    info!(bot_user_id, "authenticated");
+
+    let state = Arc::new(Mutex::new(State::open_default().map_err(|e| e.to_string())?));
+
+    let engine = Arc::new(Engine {
+        cfg: cfg.clone(),
+        api,
+        state,
+        locks: notion_sync::sync::locks::PathLocks::new(),
+        bot_user_id,
+    });
+
+    // Startup reconciliation (adopt existing pages, converge disk/state/Notion).
+    if let Err(e) = reconcile::run(engine.clone()).await {
+        error!(error = %e, "reconciliation failed; continuing into steady state");
+    }
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    spawn_signal_handler(shutdown_tx.clone());
+
+    let watcher_task = {
+        let engine = engine.clone();
+        let rx = shutdown_rx.clone();
+        tokio::spawn(async move { watcher::run(engine, rx).await })
+    };
+    let poller_task = {
+        let engine = engine.clone();
+        let rx = shutdown_rx.clone();
+        tokio::spawn(async move { poller::run(engine, rx).await })
+    };
+
+    let _ = tokio::join!(watcher_task, poller_task);
+    info!("shutdown complete");
+    Ok(())
+}
+
+fn parse_config_arg() -> PathBuf {
+    // Supports: notion-sync --config /path/to/config.toml
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if a == "--config" || a == "-c" {
+            if let Some(p) = args.next() {
+                return PathBuf::from(p);
+            }
+        } else if let Some(p) = a.strip_prefix("--config=") {
+            return PathBuf::from(p);
+        }
+    }
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+            home.join(".config")
+        });
+    base.join("notion-sync").join("config.toml")
+}
+
+#[cfg(unix)]
+fn spawn_signal_handler(shutdown_tx: watch::Sender<bool>) {
+    use tokio::signal::unix::{signal, SignalKind};
+    tokio::spawn(async move {
+        let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        let mut int = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+        tokio::select! {
+            _ = term.recv() => info!("received SIGTERM"),
+            _ = int.recv() => info!("received SIGINT"),
+        }
+        let _ = shutdown_tx.send(true);
+    });
+}
+
+#[cfg(not(unix))]
+fn spawn_signal_handler(shutdown_tx: watch::Sender<bool>) {
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        let _ = shutdown_tx.send(true);
+    });
+}

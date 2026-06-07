@@ -1,0 +1,29 @@
+# notion-sync configuration (v1: a single mapping only).
+#
+# The Notion integration token is NEVER read from this file. It is read from the
+# NOTION_TOKEN environment variable (supplied by systemd EnvironmentFile / LoadCredential).
+
+# Notion API version header to pin. Bump deliberately after re-running fidelity-probe.
+notion_version = "2022-06-28"
+
+# Notion -> local poll cadence, seconds. Default 45.
+poll_interval_secs = 45
+
+# Filesystem debounce quiet-period, milliseconds. Must be within [750, 2000].
+debounce_ms = 1000
+
+# v1 accepts only "local-wins".
+conflict_policy = "local-wins"
+
+# Maximum file size to sync, bytes. Larger files are skipped with a placeholder page.
+max_file_bytes = 5000000
+
+[mapping]
+# The local directory tree to mirror (source of truth).
+local_root = "/home/user/projects/myapp"
+
+# The Notion page that will hold the mirror. The integration must have access to it.
+parent_page_id = "0123456789abcdef0123456789abcdef"
+
+# Glob-ish ignore patterns. Supports a leading/trailing '*' and exact path segments.
+ignore = [".git", "target", "node_modules", "*.lock", ".notion-sync"]

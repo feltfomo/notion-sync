@@ -1,0 +1,47 @@
+[package]
+name = "notion-sync"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+license = "MIT"
+description = "Two-way sync daemon mirroring a local codebase into a Notion page tree"
+repository = "https://example.com/notion-sync"
+# `cargo run` (no --bin) launches the daemon; the probe stays opt-in via --bin.
+default-run = "notion-sync"
+
+# Two binaries: the daemon, and the standalone fidelity probe (Step 1 hard gate).
+[[bin]]
+name = "notion-sync"
+path = "src/main.rs"
+
+[[bin]]
+name = "fidelity-probe"
+path = "src/bin/fidelity_probe.rs"
+
+[lib]
+name = "notion_sync"
+path = "src/lib.rs"
+
+[dependencies]
+# Async runtime. Only the features we actually use, to keep the tree lean.
+tokio = { version = "1.38", features = ["rt-multi-thread", "macros", "time", "sync", "fs", "signal"] }
+# HTTP client. rustls-tls avoids an OpenSSL system dependency -> reproducible buildRustPackage.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+notify = "6"
+toml = "0.8"
+# bundled => compiles SQLite from source, no system libsqlite dependency.
+rusqlite = { version = "0.31", features = ["bundled"] }
+blake3 = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# Dev-only; does not ship in the daemon binary.
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1
