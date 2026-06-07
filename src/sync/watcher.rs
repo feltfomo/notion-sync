@@ -12,9 +12,9 @@ use notify::{Event, EventKind, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::config::is_ignored;
 use super::engine::Engine;
 use super::util;
+use crate::config::is_ignored;
 
 pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver<bool>) {
     let (raw_tx, mut raw_rx) = mpsc::unbounded_channel::<PathBuf>();
@@ -22,7 +22,8 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
 
     // notify watcher runs on its own thread and pushes absolute paths.
     let tx2 = raw_tx.clone();
-    let mut watcher = match notify::recommended_watcher(move |res: notify::Result<Event>| match res {
+    let mut watcher = match notify::recommended_watcher(move |res: notify::Result<Event>| match res
+    {
         Ok(event) => {
             if matches!(
                 event.kind,

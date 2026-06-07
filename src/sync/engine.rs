@@ -8,16 +8,16 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use crate::api::NotionClient;
+use super::conflict;
+use super::locks::PathLocks;
+use super::util;
 use crate::api::models::{BlockResp, CalloutBlockReq};
+use crate::api::NotionClient;
 use crate::chunk;
 use crate::config::Config;
 use crate::hashutil;
 use crate::language;
 use crate::state::{Node, NodeKind, State};
-use super::conflict;
-use super::locks::PathLocks;
-use super::util;
 
 pub struct Engine {
     pub cfg: Config,
@@ -52,7 +52,10 @@ impl Engine {
             return Some(self.cfg.parent_page_id.clone());
         }
         let st = self.state.lock().await;
-        st.get_by_path(&parent_rel).ok().flatten().map(|n| n.notion_page_id)
+        st.get_by_path(&parent_rel)
+            .ok()
+            .flatten()
+            .map(|n| n.notion_page_id)
     }
 
     /// Ensure a directory node exists as a subpage (idempotent).
@@ -109,7 +112,11 @@ impl Engine {
         };
 
         if bytes.len() as u64 > self.cfg.max_file_bytes {
-            warn!(rel_path, size = bytes.len(), "file exceeds max_file_bytes; placeholder only");
+            warn!(
+                rel_path,
+                size = bytes.len(),
+                "file exceeds max_file_bytes; placeholder only"
+            );
             return self.ensure_placeholder(rel_path, &bytes, "too large").await;
         }
         if util::looks_binary(&bytes) {
@@ -140,8 +147,14 @@ impl Engine {
         }
 
         match existing {
-            Some(node) => self.overwrite_body(&node, rel_path, &content, &hash, mtime_ns).await,
-            None => self.create_file_page(rel_path, &content, &hash, mtime_ns).await,
+            Some(node) => {
+                self.overwrite_body(&node, rel_path, &content, &hash, mtime_ns)
+                    .await
+            }
+            None => {
+                self.create_file_page(rel_path, &content, &hash, mtime_ns)
+                    .await
+            }
         }
     }
 
@@ -163,7 +176,12 @@ impl Engine {
             .await
             .map_err(|e| e.to_string())?;
         let block_ids = self.append_body(&page.id, content, rel_path).await?;
-        let last = self.api.get_page(&page.id).await.map_err(|e| e.to_string())?.last_edited_time;
+        let last = self
+            .api
+            .get_page(&page.id)
+            .await
+            .map_err(|e| e.to_string())?
+            .last_edited_time;
         let st = self.state.lock().await;
         st.upsert(&Node {
             rel_path: rel_path.to_string(),
@@ -199,11 +217,15 @@ impl Engine {
         match self.api.get_page(&node.notion_page_id).await {
             Ok(page) if page.in_trash => {
                 warn!(rel_path, page = %node.notion_page_id, "tracked page is in trash; recreating from local");
-                return self.create_file_page(rel_path, content, hash, mtime_ns).await;
+                return self
+                    .create_file_page(rel_path, content, hash, mtime_ns)
+                    .await;
             }
             Err(e) => {
                 warn!(rel_path, page = %node.notion_page_id, error = %e, "tracked page unreadable (deleted?); recreating from local");
-                return self.create_file_page(rel_path, content, hash, mtime_ns).await;
+                return self
+                    .create_file_page(rel_path, content, hash, mtime_ns)
+                    .await;
             }
             Ok(_) => {}
         }
@@ -212,7 +234,9 @@ impl Engine {
                 warn!(rel_path, block = %id, error = %e, "failed to trash old block; continuing");
             }
         }
-        let block_ids = self.append_body(&node.notion_page_id, content, rel_path).await?;
+        let block_ids = self
+            .append_body(&node.notion_page_id, content, rel_path)
+            .await?;
         let last = self
             .api
             .get_page(&node.notion_page_id)
@@ -244,7 +268,11 @@ impl Engine {
         let batches = chunk::batch_blocks(&blocks);
         let mut ids = Vec::new();
         for batch in batches {
-            let mut got = self.api.append_children(page_id, batch).await.map_err(|e| e.to_string())?;
+            let mut got = self
+                .api
+                .append_children(page_id, batch)
+                .await
+                .map_err(|e| e.to_string())?;
             ids.append(&mut got);
         }
         Ok(ids)
@@ -263,14 +291,19 @@ impl Engine {
             .parent_page_for(new_rel)
             .await
             .ok_or_else(|| format!("no parent page for renamed {new_rel}"))?;
-        let reparent = if new_parent != old.parent_page_id { Some(new_parent.as_str()) } else { None };
+        let reparent = if new_parent != old.parent_page_id {
+            Some(new_parent.as_str())
+        } else {
+            None
+        };
         self.api
             .update_page(&old.notion_page_id, Some(&new_title), reparent, None)
             .await
             .map_err(|e| e.to_string())?;
         {
             let st = self.state.lock().await;
-            st.rename_path(&old.rel_path, new_rel, &new_parent).map_err(|e| e.to_string())?;
+            st.rename_path(&old.rel_path, new_rel, &new_parent)
+                .map_err(|e| e.to_string())?;
         }
         // Title/parent change does not alter the body; only update bookkeeping.
         let mut moved = old.clone();
@@ -296,7 +329,11 @@ impl Engine {
         let node = { self.state.lock().await.get_by_path(rel_path).ok().flatten() };
         let Some(node) = node else { return Ok(()) };
         // A page is also a block; trashing the page trashes its subtree.
-        if let Err(e) = self.api.update_page(&node.notion_page_id, None, None, Some(true)).await {
+        if let Err(e) = self
+            .api
+            .update_page(&node.notion_page_id, None, None, Some(true))
+            .await
+        {
             warn!(rel_path, error = %e, "failed to trash page");
         }
         let st = self.state.lock().await;
@@ -306,7 +343,12 @@ impl Engine {
     }
 
     /// Create/refresh a binary (or oversized) placeholder page — no body, warning callout.
-    async fn ensure_placeholder(&self, rel_path: &str, bytes: &[u8], reason: &str) -> anyhow_lite::Result {
+    async fn ensure_placeholder(
+        &self,
+        rel_path: &str,
+        bytes: &[u8],
+        reason: &str,
+    ) -> anyhow_lite::Result {
         let existing = { self.state.lock().await.get_by_path(rel_path).ok().flatten() };
         if let Some(n) = &existing {
             if n.is_binary_placeholder {
@@ -342,7 +384,10 @@ impl Engine {
             is_binary_placeholder: true,
         })
         .map_err(|e| e.to_string())?;
-        info!(rel_path, reason, "created binary/oversized placeholder page");
+        info!(
+            rel_path,
+            reason, "created binary/oversized placeholder page"
+        );
         Ok(())
     }
 
@@ -372,7 +417,10 @@ impl Engine {
                 _ => foreign_blocks += 1,
             }
         }
-        Ok(PageBody { text: chunk::reassemble(&per_block), foreign_blocks })
+        Ok(PageBody {
+            text: chunk::reassemble(&per_block),
+            foreign_blocks,
+        })
     }
 
     /// Rebuild a page's entire body from the local file, deleting *every* existing
@@ -399,7 +447,9 @@ impl Engine {
                 warn!(rel_path, block = %b.id, error = %e, "failed to trash block during repair; continuing");
             }
         }
-        let block_ids = self.append_body(&node.notion_page_id, &content, rel_path).await?;
+        let block_ids = self
+            .append_body(&node.notion_page_id, &content, rel_path)
+            .await?;
         let last = self
             .api
             .get_page(&node.notion_page_id)
@@ -415,7 +465,10 @@ impl Engine {
         updated.is_binary_placeholder = false;
         let st = self.state.lock().await;
         st.upsert(&updated).map_err(|e| e.to_string())?;
-        warn!(rel_path, "repaired split page: rebuilt body as a clean code-block mirror");
+        warn!(
+            rel_path,
+            "repaired split page: rebuilt body as a clean code-block mirror"
+        );
         Ok(())
     }
 

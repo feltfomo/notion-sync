@@ -28,11 +28,21 @@ pub struct RawMapping {
     pub ignore: Vec<String>,
 }
 
-fn default_version() -> String { "2022-06-28".to_string() }
-fn default_poll() -> u64 { 45 }
-fn default_debounce() -> u64 { 1000 }
-fn default_policy() -> String { "local-wins".to_string() }
-fn default_max_bytes() -> u64 { 5_000_000 }
+fn default_version() -> String {
+    "2022-06-28".to_string()
+}
+fn default_poll() -> u64 {
+    45
+}
+fn default_debounce() -> u64 {
+    1000
+}
+fn default_policy() -> String {
+    "local-wins".to_string()
+}
+fn default_max_bytes() -> u64 {
+    5_000_000
+}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -68,7 +78,8 @@ impl std::error::Error for ConfigError {}
 impl Config {
     pub fn load(path: &std::path::Path) -> Result<Config, ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|e| ConfigError::Read(e.to_string()))?;
-        let raw: RawConfig = toml::from_str(&text).map_err(|e| ConfigError::Parse(e.to_string()))?;
+        let raw: RawConfig =
+            toml::from_str(&text).map_err(|e| ConfigError::Parse(e.to_string()))?;
 
         // v1 accepts only local-wins.
         if raw.conflict_policy != "local-wins" {
@@ -84,7 +95,9 @@ impl Config {
             )));
         }
         if raw.poll_interval_secs == 0 {
-            return Err(ConfigError::Invalid("poll_interval_secs must be > 0".into()));
+            return Err(ConfigError::Invalid(
+                "poll_interval_secs must be > 0".into(),
+            ));
         }
         if !raw.mapping.local_root.is_dir() {
             return Err(ConfigError::Invalid(format!(

@@ -20,7 +20,10 @@ pub struct TextContentReq {
 
 impl RichTextReq {
     pub fn text(content: String) -> Self {
-        RichTextReq { ty: "text", text: TextContentReq { content } }
+        RichTextReq {
+            ty: "text",
+            text: TextContentReq { content },
+        }
     }
 }
 
@@ -40,7 +43,14 @@ pub struct CodeReq {
 
 impl CodeBlockReq {
     pub fn new(language: String, rich_text: Vec<RichTextReq>) -> Self {
-        CodeBlockReq { object: "block", ty: "code", code: CodeReq { rich_text, language } }
+        CodeBlockReq {
+            object: "block",
+            ty: "code",
+            code: CodeReq {
+                rich_text,
+                language,
+            },
+        }
     }
 }
 
@@ -73,7 +83,10 @@ impl CalloutBlockReq {
             ty: "callout",
             callout: CalloutReq {
                 rich_text: vec![RichTextReq::text(message)],
-                icon: IconReq { ty: "emoji", emoji: "\u{26A0}\u{FE0F}".to_string() },
+                icon: IconReq {
+                    ty: "emoji",
+                    emoji: "\u{26A0}\u{FE0F}".to_string(),
+                },
             },
         }
     }
@@ -101,7 +114,10 @@ pub struct ParentReq {
 
 impl ParentReq {
     pub fn page(page_id: String) -> Self {
-        ParentReq { ty: "page_id", page_id }
+        ParentReq {
+            ty: "page_id",
+            page_id,
+        }
     }
 }
 

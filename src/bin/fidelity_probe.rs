@@ -33,22 +33,30 @@ async fn run() -> Result<(), String> {
     payload.push_str("\tlet x = 1;   \n"); // trailing spaces
     payload.push_str("\t\tlet y = 2;\n"); // double tab
     payload.push_str("    let z = 3;\n"); // four-space indent
-    payload.push_str("\n"); // internal blank line
+    payload.push('\n'); // internal blank line
     payload.push_str("\t// emoji \u{1F680} CJK \u{4F60}\u{597D} euro \u{20AC} accented \u{00E9}\n");
     // Force a >2000-char item so multibyte boundary handling is exercised.
     payload.push_str(&"\u{1F600}".repeat(2100));
     payload.push_str("\n}\n");
 
     println!("creating probe page under {parent} ...");
-    let page = api.create_page(&parent, "Fidelity Probe", vec![]).await.map_err(|e| e.to_string())?;
+    let page = api
+        .create_page(&parent, "Fidelity Probe", vec![])
+        .await
+        .map_err(|e| e.to_string())?;
 
     // Encode + append exactly as the daemon would.
     let blocks = chunk::encode(&payload, "rust");
     for batch in chunk::batch_blocks(&blocks) {
-        api.append_children(&page.id, batch).await.map_err(|e| e.to_string())?;
+        api.append_children(&page.id, batch)
+            .await
+            .map_err(|e| e.to_string())?;
     }
 
-    let children = api.list_children(&page.id).await.map_err(|e| e.to_string())?;
+    let children = api
+        .list_children(&page.id)
+        .await
+        .map_err(|e| e.to_string())?;
     let per_block: Vec<Vec<String>> = children
         .iter()
         .filter(|b| b.ty == "code")

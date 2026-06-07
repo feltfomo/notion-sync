@@ -9,14 +9,15 @@ use std::sync::Arc;
 
 use tracing::{info, warn};
 
-use crate::api::models::PageResp;
-use crate::state::{Node, NodeKind};
 use super::engine::Engine;
 use super::util::{self, WalkEntry};
+use crate::api::models::PageResp;
+use crate::state::{Node, NodeKind};
 
 pub async fn run(engine: Arc<Engine>) -> Result<(), String> {
     info!("starting reconciliation pass");
-    let entries = util::walk(&engine.cfg.local_root, &engine.cfg.ignore).map_err(|e| e.to_string())?;
+    let entries =
+        util::walk(&engine.cfg.local_root, &engine.cfg.ignore).map_err(|e| e.to_string())?;
 
     // Safety guard: never treat a missing or empty tree as "the user deleted
     // everything." Pass 3 below trashes the Notion page for every tracked node that
@@ -30,7 +31,9 @@ pub async fn run(engine: Arc<Engine>) -> Result<(), String> {
         ));
     }
     if entries.is_empty() {
-        warn!("local tree walk returned no entries; skipping reconcile to avoid trashing the mirror");
+        warn!(
+            "local tree walk returned no entries; skipping reconcile to avoid trashing the mirror"
+        );
         return Ok(());
     }
 
@@ -53,7 +56,14 @@ pub async fn run(engine: Arc<Engine>) -> Result<(), String> {
     }
 
     // Pass 3: tracked nodes whose local files are gone => delete from Notion.
-    let tracked = { engine.state.lock().await.all_tracked().map_err(|e| e.to_string())? };
+    let tracked = {
+        engine
+            .state
+            .lock()
+            .await
+            .all_tracked()
+            .map_err(|e| e.to_string())?
+    };
     for node in tracked {
         if !on_disk.contains(&node.rel_path) {
             info!(rel_path = %node.rel_path, "tracked node missing on disk; deleting");
@@ -67,7 +77,15 @@ pub async fn run(engine: Arc<Engine>) -> Result<(), String> {
 }
 
 async fn adopt_or_create_dir(engine: &Arc<Engine>, entry: &WalkEntry) -> Result<(), String> {
-    let tracked = { engine.state.lock().await.get_by_path(&entry.rel_path).ok().flatten() };
+    let tracked = {
+        engine
+            .state
+            .lock()
+            .await
+            .get_by_path(&entry.rel_path)
+            .ok()
+            .flatten()
+    };
     if tracked.is_some() {
         return Ok(());
     }
@@ -97,7 +115,15 @@ async fn adopt_or_create_dir(engine: &Arc<Engine>, entry: &WalkEntry) -> Result<
 }
 
 async fn adopt_then_sync_file(engine: &Arc<Engine>, entry: &WalkEntry) -> Result<(), String> {
-    let tracked = { engine.state.lock().await.get_by_path(&entry.rel_path).ok().flatten() };
+    let tracked = {
+        engine
+            .state
+            .lock()
+            .await
+            .get_by_path(&entry.rel_path)
+            .ok()
+            .flatten()
+    };
     if tracked.is_none() {
         // Adopt an existing page if one already sits at this path/title.
         if let Some(parent) = parent_page_for(engine, &entry.rel_path).await {
@@ -132,10 +158,17 @@ async fn parent_page_for(engine: &Arc<Engine>, rel_path: &str) -> Option<String>
         return Some(engine.cfg.parent_page_id.clone());
     }
     let st = engine.state.lock().await;
-    st.get_by_path(&parent_rel).ok().flatten().map(|n| n.notion_page_id)
+    st.get_by_path(&parent_rel)
+        .ok()
+        .flatten()
+        .map(|n| n.notion_page_id)
 }
 
-async fn find_child_by_title(engine: &Arc<Engine>, parent_id: &str, title: &str) -> Option<AdoptInfo> {
+async fn find_child_by_title(
+    engine: &Arc<Engine>,
+    parent_id: &str,
+    title: &str,
+) -> Option<AdoptInfo> {
     let blocks = engine.api.list_children(parent_id).await.ok()?;
     for b in blocks {
         if b.ty == "child_page" {

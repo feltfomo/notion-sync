@@ -22,7 +22,11 @@ impl NodeKind {
         }
     }
     fn parse(s: &str) -> NodeKind {
-        if s == "dir" { NodeKind::Dir } else { NodeKind::File }
+        if s == "dir" {
+            NodeKind::Dir
+        } else {
+            NodeKind::File
+        }
     }
 }
 
@@ -177,7 +181,8 @@ impl State {
     }
 
     pub fn delete(&self, rel_path: &str) -> rusqlite::Result<()> {
-        self.conn.execute("DELETE FROM nodes WHERE rel_path = ?1", params![rel_path])?;
+        self.conn
+            .execute("DELETE FROM nodes WHERE rel_path = ?1", params![rel_path])?;
         Ok(())
     }
 
@@ -214,7 +219,9 @@ fn default_db_path() -> PathBuf {
     let base = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
             home.join(".local/state")
         });
     base.join("notion-sync").join("state.db")

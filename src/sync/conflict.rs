@@ -5,10 +5,10 @@
 
 use tracing::{info, warn};
 
-use crate::hashutil;
-use crate::state::Node;
 use super::engine::{anyhow_lite, Engine};
 use super::util;
+use crate::hashutil;
+use crate::state::Node;
 
 pub async fn resolve_pull(engine: &Engine, node: &Node) -> anyhow_lite::Result {
     if node.is_binary_placeholder {

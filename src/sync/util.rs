@@ -64,10 +64,18 @@ fn walk_inner(
         let rel_str = rel_to_unix(&rel);
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
-            out.push(WalkEntry { rel_path: rel_str, abs_path: abs.clone(), is_dir: true });
+            out.push(WalkEntry {
+                rel_path: rel_str,
+                abs_path: abs.clone(),
+                is_dir: true,
+            });
             walk_inner(root, &abs, ignore, out)?;
         } else if file_type.is_file() {
-            out.push(WalkEntry { rel_path: rel_str, abs_path: abs, is_dir: false });
+            out.push(WalkEntry {
+                rel_path: rel_str,
+                abs_path: abs,
+                is_dir: false,
+            });
         }
         // Symlinks are skipped in v1.
     }

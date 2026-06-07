@@ -29,7 +29,14 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
 }
 
 async fn poll_once(engine: &Arc<Engine>) -> Result<(), String> {
-    let nodes = { engine.state.lock().await.all_tracked().map_err(|e| e.to_string())? };
+    let nodes = {
+        engine
+            .state
+            .lock()
+            .await
+            .all_tracked()
+            .map_err(|e| e.to_string())?
+    };
     for node in nodes {
         if node.kind != crate::state::NodeKind::File || node.is_binary_placeholder {
             continue;

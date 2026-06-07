@@ -17,7 +17,9 @@ use notion_sync::sync::{poller, reconcile, watcher, Engine};
 async fn main() {
     // journald-friendly: no ANSI, structured fields. RUST_LOG overrides level.
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_ansi(false)
         .with_target(false)
         .init();
@@ -48,12 +50,15 @@ async fn run() -> Result<(), String> {
     );
 
     // Identify ourselves once for echo-loop suppression.
-    let bot_user_id = api.whoami().await.map_err(|e| {
-        format!("failed GET /v1/users/me (token valid?): {e}")
-    })?;
+    let bot_user_id = api
+        .whoami()
+        .await
+        .map_err(|e| format!("failed GET /v1/users/me (token valid?): {e}"))?;
     info!(bot_user_id, "authenticated");
 
-    let state = Arc::new(Mutex::new(State::open_default().map_err(|e| e.to_string())?));
+    let state = Arc::new(Mutex::new(
+        State::open_default().map_err(|e| e.to_string())?,
+    ));
 
     let engine = Arc::new(Engine {
         cfg: cfg.clone(),
@@ -102,7 +107,9 @@ fn parse_config_arg() -> PathBuf {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default();
             home.join(".config")
         });
     base.join("notion-sync").join("config.toml")

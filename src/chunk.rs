@@ -28,7 +28,11 @@ impl EncodedBlock {
 // Empty files still emit one empty block, so every page has a body block to diff against.
 pub fn encode(content: &str, language: &str) -> Vec<EncodedBlock> {
     let segments = split_into_segments(content);
-    let segments = if segments.is_empty() { vec![String::new()] } else { segments };
+    let segments = if segments.is_empty() {
+        vec![String::new()]
+    } else {
+        segments
+    };
 
     let mut blocks = Vec::new();
     for chunk in segments.chunks(MAX_ITEMS_PER_BLOCK) {

@@ -24,11 +24,20 @@ pub struct NotionClient {
 }
 
 impl NotionClient {
-    pub fn new(token: String, version: String, limiter: Arc<RateLimiter>) -> Result<Self, ApiError> {
+    pub fn new(
+        token: String,
+        version: String,
+        limiter: Arc<RateLimiter>,
+    ) -> Result<Self, ApiError> {
         let http = reqwest::Client::builder()
             .user_agent("notion-sync/0.1")
             .build()?;
-        Ok(NotionClient { http, token, version, limiter })
+        Ok(NotionClient {
+            http,
+            token,
+            version,
+            limiter,
+        })
     }
 
     /// Core request primitive: rate-limit, send, classify status, retry transient.
@@ -138,7 +147,8 @@ impl NotionClient {
             "properties": title_properties(title),
             "children": children,
         });
-        self.request_json(Method::POST, "/v1/pages", Some(&body)).await
+        self.request_json(Method::POST, "/v1/pages", Some(&body))
+            .await
     }
 
     pub async fn get_page(&self, page_id: &str) -> Result<PageResp, ApiError> {
@@ -159,14 +169,18 @@ impl NotionClient {
             body.insert("properties".into(), title_properties(t));
         }
         if let Some(p) = new_parent_page_id {
-            body.insert("parent".into(), serde_json::json!({ "type": "page_id", "page_id": p }));
+            body.insert(
+                "parent".into(),
+                serde_json::json!({ "type": "page_id", "page_id": p }),
+            );
         }
         if let Some(trash) = in_trash {
             // PATCH /v1/pages uses `archived` to move a page to / out of trash.
             body.insert("archived".into(), serde_json::json!(trash));
         }
         let path = format!("/v1/pages/{page_id}");
-        self.request_json(Method::PATCH, &path, Some(&serde_json::Value::Object(body))).await
+        self.request_json(Method::PATCH, &path, Some(&serde_json::Value::Object(body)))
+            .await
     }
 
     /// PATCH /v1/blocks/{id}/children — append up to 100 blocks per call.
@@ -241,8 +255,16 @@ async fn read_error_body(resp: Response) -> (String, String) {
     match resp.text().await {
         Ok(text) => {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                let code = v.get("code").and_then(|c| c.as_str()).unwrap_or("unknown").to_string();
-                let message = v.get("message").and_then(|m| m.as_str()).unwrap_or(&text).to_string();
+                let code = v
+                    .get("code")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let message = v
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or(&text)
+                    .to_string();
                 debug!(status = status.as_u16(), code = %code, "notion error body parsed");
                 (code, message)
             } else {

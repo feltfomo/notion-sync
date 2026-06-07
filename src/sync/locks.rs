@@ -13,7 +13,9 @@ pub struct PathLocks {
 
 impl PathLocks {
     pub fn new() -> Self {
-        PathLocks { map: Arc::new(Mutex::new(HashMap::new())) }
+        PathLocks {
+            map: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Get-or-create the lock for `rel_path`; the caller holds it for the critical section.
