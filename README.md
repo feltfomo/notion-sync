@@ -5,11 +5,8 @@ sync. **The local filesystem is the source of truth** (local-wins). Notion becom
 mirror you can read, comment on, and lightly edit from anywhere — the files on disk
 always win.
 
-It mirrors any UTF-8 text files — code, Markdown, config, prose — not just code. Each
+It mirrors any UTF-8 text files code, Markdown, config, prose — not just code. Each
 file's bytes are wrapped in Notion code blocks so they round-trip exactly.
-
-> **v1 scope.** Single mapping, UTF-8 text files, local-wins conflicts, folder/file
-> mirroring, rename detection, startup reconciliation, NixOS systemd user service.
 
 ---
 

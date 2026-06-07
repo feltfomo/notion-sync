@@ -2,8 +2,8 @@
 
 use std::fmt;
 
-/// A structured Notion API error. Every failed request surfaces the HTTP status,
-/// the Notion `code` string, and the human message, so logs are actionable.
+/// A failed Notion request: the HTTP status, Notion's `code` string, and the
+/// message. We keep all three so a log line actually tells you what broke.
 #[derive(Debug, Clone)]
 pub struct NotionApiError {
     pub status: u16,

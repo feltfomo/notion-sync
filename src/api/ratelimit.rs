@@ -1,9 +1,9 @@
 //! A single shared token-bucket rate limiter.
 //!
-//! CRITICAL: there is exactly ONE of these for the whole process, shared (via Arc)
-//! by the watcher's push path and the poller's pull path. They are NOT independent
-//! clients; Notion's ~3 req/s limit is per-integration, so both directions must draw
-//! from the same bucket or we will trip 429s under load.
+//! There's exactly one of these per process, shared (via Arc) between the watcher's
+//! push path and the poller's pull path. They are NOT separate clients. Notion's
+//! ~3 req/s limit is per-integration, so both directions have to draw from the same
+//! bucket or we trip 429s under load.
 
 use std::time::Duration;
 use tokio::sync::Mutex;

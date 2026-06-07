@@ -1,8 +1,8 @@
 //! SQLite-backed sync state (`state.db`).
 //!
-//! NOTE (multi-machine limitation, v1): this database is intentionally machine-local.
-//! Running two daemons against the same Notion tree from different machines is
-//! UNSUPPORTED in v1 — there is no shared/remote state. Do not design around it.
+//! This DB is machine-local, on purpose. There's no shared or remote state, so
+//! pointing two daemons at the same Notion tree from different machines will corrupt
+//! the mapping in v1. Don't design around it.
 
 use std::path::{Path, PathBuf};
 

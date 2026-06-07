@@ -1,7 +1,7 @@
-//! Serde models for exactly the Notion API surface this daemon uses.
+//! Serde models covering just the slice of the Notion API this daemon touches.
 //!
-//! These intentionally cover only the fields we read/write. `serde` ignores unknown
-//! fields by default on deserialize, so partial models are safe.
+//! Only the fields we read or write are here. serde drops unknown fields on
+//! deserialize, so these partial structs are safe.
 
 use serde::{Deserialize, Serialize};
 

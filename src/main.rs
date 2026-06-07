@@ -108,11 +108,10 @@ fn parse_config_arg() -> PathBuf {
     base.join("notion-sync").join("config.toml")
 }
 
-/// First-run scaffolding. If the config file does not exist yet, create its parent
-/// directory, write a starter copy from the bundled example, and return `false` so
-/// the caller can tell the user what to edit instead of failing with a cryptic
-/// "cannot read config" on a fresh install. Returns `true` if a config already
-/// exists and the daemon should proceed.
+/// First-run scaffolding. If there's no config yet, create the parent dir, drop in a
+/// copy of the bundled example, and return `false` so the caller can point the user
+/// at what to edit instead of dying with a cryptic "cannot read config" on a fresh
+/// install. Returns `true` when a config already exists and we should just run.
 fn ensure_config_exists(path: &std::path::Path) -> Result<bool, String> {
     if path.exists() {
         return Ok(true);
