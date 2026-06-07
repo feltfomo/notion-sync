@@ -1,5 +1,22 @@
+# Rust build output
 /target
-*.db
-*.db-journal
+**/*.rs.bk
+
+# Runtime state and local artifacts (never commit)
 .notion-sync/
-/result
+state.db
+*.db
+*.db-wal
+*.db-shm
+
+# Secrets and personal config (ship config.example.toml instead)
+*.env
+config.toml
+
+# Nix / editor / OS noise
+result
+.direnv/
+.DS_Store
+
+# NOTE: Cargo.lock is intentionally committed (this is a binary; the flake's
+# cargoLock.lockFile = ./Cargo.lock needs it for reproducible builds).

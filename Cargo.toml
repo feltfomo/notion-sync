@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.74"
 license = "MIT"
 description = "Two-way sync daemon mirroring a local codebase into a Notion page tree"
-repository = "https://example.com/notion-sync"
+repository = "https://github.com/feltfomo/notion-sync"
 # `cargo run` (no --bin) launches the daemon; the probe stays opt-in via --bin.
 default-run = "notion-sync"
 

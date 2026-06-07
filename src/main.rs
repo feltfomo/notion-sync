@@ -30,6 +30,13 @@ async fn main() {
 
 async fn run() -> Result<(), String> {
     let config_path = parse_config_arg();
+    if !ensure_config_exists(&config_path)? {
+        info!(
+            path = %config_path.display(),
+            "wrote a starter config; edit local_root + parent_page_id, export $NOTION_TOKEN, then re-run"
+        );
+        return Ok(());
+    }
     let cfg = Config::load(&config_path).map_err(|e| e.to_string())?;
     info!(local_root = %cfg.local_root.display(), parent = %cfg.parent_page_id, "loaded config");
 
@@ -99,6 +106,24 @@ fn parse_config_arg() -> PathBuf {
             home.join(".config")
         });
     base.join("notion-sync").join("config.toml")
+}
+
+/// First-run scaffolding. If the config file does not exist yet, create its parent
+/// directory, write a starter copy from the bundled example, and return `false` so
+/// the caller can tell the user what to edit instead of failing with a cryptic
+/// "cannot read config" on a fresh install. Returns `true` if a config already
+/// exists and the daemon should proceed.
+fn ensure_config_exists(path: &std::path::Path) -> Result<bool, String> {
+    if path.exists() {
+        return Ok(true);
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create config dir {}: {e}", dir.display()))?;
+    }
+    std::fs::write(path, include_str!("../config.example.toml"))
+        .map_err(|e| format!("cannot write starter config {}: {e}", path.display()))?;
+    Ok(false)
 }
 
 #[cfg(unix)]

@@ -36,8 +36,15 @@
           };
         };
 
+        apps.default = {
+          type = "app";
+          program = "${self.packages.${system}.default}/bin/notion-sync";
+        };
+
         devShells.default = pkgs.mkShell {
           packages = [ pkgs.cargo pkgs.rustc pkgs.rust-analyzer pkgs.clippy pkgs.rustfmt ];
         };
+
+        formatter = pkgs.nixpkgs-fmt;
       });
 }

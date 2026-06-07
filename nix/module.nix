@@ -56,7 +56,7 @@ in
   config = lib.mkIf cfg.enable {
     systemd.user.services.notion-sync = {
       description = "Two-way Notion <-> codebase sync daemon";
-      documentation = [ "https://example.com/notion-sync" ];
+      documentation = [ "https://github.com/feltfomo/notion-sync" ];
       wantedBy = [ "default.target" ];
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
