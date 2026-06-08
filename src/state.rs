@@ -305,8 +305,8 @@ impl State {
             "SELECT id, rel_path, page_id, side, blake3, size_bytes, reason, captured_at \
              FROM snapshot WHERE rel_path = ?1 ORDER BY captured_at DESC, id DESC LIMIT ?2",
         )?;
-        stmt.query_map(params![rel_path, limit as i64], row_to_snapshot)?
-            .collect()
+        let rows = stmt.query_map(params![rel_path, limit as i64], row_to_snapshot)?;
+        rows.collect()
     }
 
     pub fn snapshot_by_id(&self, id: i64) -> rusqlite::Result<Option<SnapshotRow>> {
@@ -340,7 +340,8 @@ impl State {
     /// Distinct blob hashes still referenced by the index (GC mark phase).
     pub fn distinct_snapshot_hashes(&self) -> rusqlite::Result<std::collections::HashSet<String>> {
         let mut stmt = self.conn.prepare("SELECT DISTINCT blake3 FROM snapshot")?;
-        stmt.query_map([], |r| r.get::<_, String>(0))?.collect()
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect()
     }
 
     /// Drop snapshot rows older than `cutoff` (RFC3339) while always keeping the newest
@@ -394,15 +395,16 @@ impl State {
                     "SELECT id, ts, rel_path, action, from_hash, to_hash, side FROM journal \
                      WHERE rel_path = ?1 ORDER BY id DESC LIMIT ?2",
                 )?;
-                stmt.query_map(params![p, limit as i64], row_to_journal)?
-                    .collect()
+                let rows = stmt.query_map(params![p, limit as i64], row_to_journal)?;
+                rows.collect()
             }
             None => {
                 let mut stmt = self.conn.prepare(
                     "SELECT id, ts, rel_path, action, from_hash, to_hash, side FROM journal \
                      ORDER BY id DESC LIMIT ?1",
                 )?;
-                stmt.query_map(params![limit as i64], row_to_journal)?.collect()
+                let rows = stmt.query_map(params![limit as i64], row_to_journal)?;
+                rows.collect()
             }
         }
     }
