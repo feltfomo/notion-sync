@@ -456,3 +456,45 @@ async fn gc_cmd(
     println!("gc: pruned {removed_rows} snapshot rows, deleted {objs} blobs, freed {freed} bytes");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn age_parsing_units() {
+        assert_eq!(parse_age_secs("30s"), Some(30));
+        assert_eq!(parse_age_secs("5m"), Some(300));
+        assert_eq!(parse_age_secs("2h"), Some(7_200));
+        assert_eq!(parse_age_secs("3d"), Some(259_200));
+        assert_eq!(parse_age_secs("1w"), Some(604_800));
+    }
+
+    #[test]
+    fn age_parsing_rejects_junk() {
+        assert_eq!(parse_age_secs("abc"), None);
+        assert_eq!(parse_age_secs("10y"), None); // unsupported unit
+        assert_eq!(parse_age_secs(""), None);
+        assert_eq!(parse_age_secs("h"), None); // missing number
+    }
+
+    #[test]
+    fn at_cutoff_passes_through_rfc3339() {
+        let ts = "2026-01-02T03:04:05.000Z";
+        assert_eq!(parse_at_cutoff(ts).unwrap(), ts);
+    }
+
+    #[test]
+    fn at_cutoff_resolves_age_to_timestamp() {
+        let out = parse_at_cutoff("1d").unwrap();
+        assert_ne!(out, "1d");
+        assert!(out.contains('T') && out.ends_with('Z'));
+    }
+
+    #[test]
+    fn short_truncates_to_eight() {
+        assert_eq!(short(&Some("0123456789".to_string())), "01234567");
+        assert_eq!(short(&Some("abc".to_string())), "abc");
+        assert_eq!(short(&None), "-");
+    }
+}

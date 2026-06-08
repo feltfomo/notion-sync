@@ -20,4 +20,7 @@ result
 
 # NOTE: Cargo.lock is intentionally committed (this is a binary; the flake's
 # cargoLock.lockFile = ./Cargo.lock needs it for reproducible builds).
-config.toml
+#
+# If config.toml was already committed before this rule existed, untrack it
+# (this keeps your local copy) and commit the removal:
+#     git rm --cached config.toml && git commit -m "chore: stop tracking config.toml"

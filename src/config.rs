@@ -192,3 +192,31 @@ pub fn load_token(token_file: Option<&std::path::Path>) -> Result<String, Config
             .into(),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn glob_exact_leading_trailing_and_both_ended() {
+        assert!(glob_match("target", "target"));
+        assert!(!glob_match("target", "targets"));
+        assert!(glob_match("*.lock", "Cargo.lock"));
+        assert!(!glob_match("*.lock", "Cargo.toml"));
+        assert!(glob_match("build*", "build.rs"));
+        // both-ended 'contains' must not be shadowed by the leading-'*' branch.
+        assert!(glob_match("*node*", "node_modules"));
+        assert!(glob_match("*node*", "my-node-thing"));
+        assert!(!glob_match("*node*", "package.json"));
+    }
+
+    #[test]
+    fn is_ignored_matches_any_component() {
+        let pats = vec![".git".to_string(), "target".to_string(), "*.lock".to_string()];
+        assert!(is_ignored(Path::new("target/debug/foo"), &pats));
+        assert!(is_ignored(Path::new("a/b/Cargo.lock"), &pats));
+        assert!(is_ignored(Path::new(".git/HEAD"), &pats));
+        assert!(!is_ignored(Path::new("src/main.rs"), &pats));
+    }
+}

@@ -572,4 +572,73 @@ mod tests {
         let after = st.get_by_path("b.rs").unwrap().unwrap();
         assert_eq!(after.notion_page_id, page_before);
     }
+
+    #[test]
+    fn delete_subtree_removes_descendants_not_siblings() {
+        let st = State::open_in_memory().unwrap();
+        st.upsert(&sample("dir", "h0")).unwrap();
+        st.upsert(&sample("dir/a.rs", "h1")).unwrap();
+        st.upsert(&sample("dir/sub/b.rs", "h2")).unwrap();
+        st.upsert(&sample("dir2/c.rs", "h3")).unwrap();
+        let removed = st.delete_subtree("dir").unwrap();
+        assert_eq!(removed.len(), 3);
+        assert!(st.get_by_path("dir/a.rs").unwrap().is_none());
+        // 'dir2' must survive: substr() guards against the LIKE-style prefix bug.
+        assert!(st.get_by_path("dir2/c.rs").unwrap().is_some());
+    }
+
+    #[test]
+    fn snapshots_insert_list_and_resolve_by_cutoff() {
+        let st = State::open_in_memory().unwrap();
+        let id1 = st
+            .insert_snapshot("f.rs", Some("p1"), "local", "hashA", 10, "manual")
+            .unwrap();
+        let id2 = st
+            .insert_snapshot("f.rs", None, "notion", "hashB", 20, "pre-pull")
+            .unwrap();
+        assert!(id2 > id1);
+
+        let rows = st.list_snapshots("f.rs", 10).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, id2, "newest first (id breaks captured_at ties)");
+
+        let newest = st
+            .snapshot_at_or_before("f.rs", "9999-01-01T00:00:00.000Z")
+            .unwrap()
+            .unwrap();
+        assert_eq!(newest.id, id2);
+        assert!(st
+            .snapshot_at_or_before("f.rs", "1970-01-01T00:00:00.000Z")
+            .unwrap()
+            .is_none());
+
+        let hashes = st.distinct_snapshot_hashes().unwrap();
+        assert!(hashes.contains("hashA") && hashes.contains("hashB"));
+    }
+
+    #[test]
+    fn gc_keeps_minimum_per_path_side() {
+        let mut st = State::open_in_memory().unwrap();
+        for i in 0..5i64 {
+            st.insert_snapshot("f.rs", None, "local", &format!("h{i}"), i, "auto")
+                .unwrap();
+        }
+        // Far-future cutoff => every row qualifies as old; keep the newest 2.
+        let removed = st.gc_snapshots("9999-01-01T00:00:00.000Z", 2).unwrap();
+        assert_eq!(removed, 3);
+        assert_eq!(st.list_snapshots("f.rs", 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn journal_appends_and_filters_by_path() {
+        let st = State::open_in_memory().unwrap();
+        st.insert_journal("a.rs", "push_overwrite", Some("old"), Some("new"), "to_notion")
+            .unwrap();
+        st.insert_journal("b.rs", "create", None, Some("x"), "to_notion")
+            .unwrap();
+        assert_eq!(st.list_journal(None, 10).unwrap().len(), 2);
+        let only_a = st.list_journal(Some("a.rs"), 10).unwrap();
+        assert_eq!(only_a.len(), 1);
+        assert_eq!(only_a[0].action, "push_overwrite");
+    }
 }
