@@ -516,7 +516,7 @@ impl Engine {
             .ok_or_else(|| format!("no parent page for {rel_path}"))?;
         let title = util::title_for(rel_path).to_string();
         let msg = format!(
-            "\u{26A0}\u{FE0F} {reason} file not synced ({} bytes). Source of truth remains local.",
+            "{reason} file not synced ({} bytes). Source of truth remains local.",
             bytes.len()
         );
         let callout = serde_json::to_value(CalloutBlockReq::warning(msg)).unwrap();
