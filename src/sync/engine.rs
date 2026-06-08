@@ -51,7 +51,7 @@ impl Engine {
     /// `reason` is the trigger ("pre-push"/"pre-pull"/"conflict"/"manual"/"pre-restore").
     /// Returns the blake3 hash of the saved blob. Best-effort by design: a snapshot
     /// failure must never block the sync it protects, so errors are logged, not bubbled.
-    async fn capture(
+    pub(crate) async fn capture(
         &self,
         rel_path: &str,
         page_id: Option<&str>,
@@ -77,7 +77,7 @@ impl Engine {
     }
 
     /// Append an audit row to the sync journal (best-effort; never blocks a sync).
-    async fn journal(
+    pub(crate) async fn journal(
         &self,
         rel_path: &str,
         action: &str,
@@ -440,6 +440,61 @@ impl Engine {
             "deleted (trashed page + descendant rows)"
         );
         Ok(())
+    }
+
+    /// Apply a remote deletion (the Notion page was trashed) to the local mirror:
+    /// snapshot the local file for recovery, remove it from disk, and drop its rows.
+    /// The snapshot is best-effort; the unlink + row removal are the durable effects.
+    pub async fn handle_remote_delete(&self, node: &Node) -> anyhow_lite::Result {
+        let lock = self.locks.lock_for(&node.rel_path).await;
+        let _g = lock.lock().await;
+        let abs = self.abs_path(&node.rel_path);
+        if let Ok(bytes) = tokio::fs::read(&abs).await {
+            self.capture(
+                &node.rel_path,
+                Some(&node.notion_page_id),
+                "local",
+                "remote-delete",
+                bytes,
+            )
+            .await;
+        }
+        if let Err(e) = tokio::fs::remove_file(&abs).await {
+            warn!(rel_path = %node.rel_path, error = %e, "failed to remove local file for remote delete; continuing");
+        }
+        let removed = {
+            let st = self.state.lock().await;
+            st.delete_subtree(&node.rel_path).map_err(|e| e.to_string())?
+        };
+        for n in &removed {
+            self.journal(&n.rel_path, "remote_delete", None, None, "from_notion")
+                .await;
+        }
+        info!(rel_path = %node.rel_path, removed = removed.len(), "applied remote delete to local mirror");
+        Ok(())
+    }
+
+    /// Snapshot a page's current Notion body before it is trashed, so a deletion stays
+    /// recoverable. Used by the reconcile mass-delete guard. Best-effort.
+    pub async fn snapshot_remote_before_delete(&self, node: &Node) {
+        if node.kind != NodeKind::File || node.is_binary_placeholder {
+            return;
+        }
+        match self.read_page_body(node).await {
+            Ok(body) => {
+                self.capture(
+                    &node.rel_path,
+                    Some(&node.notion_page_id),
+                    "notion",
+                    "pre-delete",
+                    body.text.into_bytes(),
+                )
+                .await;
+            }
+            Err(e) => {
+                warn!(rel_path = %node.rel_path, error = %e, "pre-delete snapshot read failed; continuing")
+            }
+        }
     }
 
     /// Create/refresh a binary (or oversized) placeholder page — no body, warning callout.

@@ -1,14 +1,17 @@
-//! Daemon entrypoint. Boots the shared API client, opens state.db, runs a startup
-//! reconciliation pass, then runs the watcher and poller concurrently until SIGTERM.
+//! Entrypoint. Parses the CLI, then either boots the sync daemon (`run`, the default
+//! when no subcommand is given) or hands off to a `cli` subcommand
+//! (backup/restore/history/log/diff/show/untrash/gc).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use clap::Parser;
 use tokio::sync::{watch, Mutex};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use notion_sync::api::{NotionClient, RateLimiter};
+use notion_sync::cli::{Cli, Command};
 use notion_sync::config::Config;
 use notion_sync::state::State;
 use notion_sync::sync::{poller, reconcile, watcher, Engine};
@@ -24,22 +27,58 @@ async fn main() {
         .with_target(false)
         .init();
 
-    if let Err(e) = run().await {
+    let cli = Cli::parse();
+    if let Err(e) = real_main(cli).await {
         error!(error = %e, "fatal");
         std::process::exit(1);
     }
 }
 
-async fn run() -> Result<(), String> {
-    let config_path = parse_config_arg();
-    if !ensure_config_exists(&config_path)? {
+async fn real_main(cli: Cli) -> Result<(), String> {
+    let config_path = resolve_config_path(cli.config);
+    match cli.command {
+        // Daemon is the default when no subcommand is supplied.
+        None | Some(Command::Run) => run_daemon(&config_path).await,
+        Some(command) => {
+            // The non-daemon subcommands need an engine (state + store + api) but not
+            // the watcher/poller, and no whoami round-trip (only `untrash` calls out).
+            let engine = build_engine(&config_path, String::new()).await?;
+            notion_sync::cli::dispatch(engine, command).await
+        }
+    }
+}
+
+/// Build the shared engine: config, API client, state.db, object store. Does NOT call
+/// whoami; the daemon passes its bot id in, subcommands pass an empty string.
+async fn build_engine(config_path: &Path, bot_user_id: String) -> Result<Arc<Engine>, String> {
+    let cfg = Config::load(config_path).map_err(|e| e.to_string())?;
+    let limiter = Arc::new(RateLimiter::notion_default());
+    let api = Arc::new(
+        NotionClient::new(cfg.token.clone(), cfg.notion_version.clone(), limiter)
+            .map_err(|e| e.to_string())?,
+    );
+    let state = Arc::new(Mutex::new(
+        State::open_default().map_err(|e| e.to_string())?,
+    ));
+    Ok(Arc::new(Engine {
+        cfg: cfg.clone(),
+        api,
+        state,
+        locks: notion_sync::sync::locks::PathLocks::new(),
+        store: notion_sync::sync::snapshot::ObjectStore::new(&cfg.local_root),
+        bot_user_id,
+    }))
+}
+
+async fn run_daemon(config_path: &Path) -> Result<(), String> {
+    if !ensure_config_exists(config_path)? {
         info!(
             path = %config_path.display(),
             "wrote a starter config; edit local_root + parent_page_id, export $NOTION_TOKEN, then re-run"
         );
         return Ok(());
     }
-    let cfg = Config::load(&config_path).map_err(|e| e.to_string())?;
+    let cfg = Config::load(config_path).map_err(|e| e.to_string())?;
     info!(local_root = %cfg.local_root.display(), parent = %cfg.parent_page_id, "loaded config");
 
     // Shared token bucket: the watcher and poller draw from the SAME limiter.
@@ -93,17 +132,9 @@ async fn run() -> Result<(), String> {
     Ok(())
 }
 
-fn parse_config_arg() -> PathBuf {
-    // Supports: notion-sync --config /path/to/config.toml
-    let mut args = std::env::args().skip(1);
-    while let Some(a) = args.next() {
-        if a == "--config" || a == "-c" {
-            if let Some(p) = args.next() {
-                return PathBuf::from(p);
-            }
-        } else if let Some(p) = a.strip_prefix("--config=") {
-            return PathBuf::from(p);
-        }
+fn resolve_config_path(explicit: Option<PathBuf>) -> PathBuf {
+    if let Some(p) = explicit {
+        return p;
     }
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)

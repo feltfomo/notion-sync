@@ -16,8 +16,9 @@ use crate::state::{Node, NodeKind};
 
 pub async fn run(engine: Arc<Engine>) -> Result<(), String> {
     info!("starting reconciliation pass");
-    let entries =
-        util::walk(&engine.cfg.local_root, &engine.cfg.ignore).map_err(|e| e.to_string())?;
+    let entries = util::walk_async(engine.cfg.local_root.clone(), engine.cfg.ignore.clone())
+        .await
+        .map_err(|e| e.to_string())?;
 
     // Safety guard: never treat a missing or empty tree as "the user deleted
     // everything." Pass 3 below trashes the Notion page for every tracked node that
@@ -64,12 +65,39 @@ pub async fn run(engine: Arc<Engine>) -> Result<(), String> {
             .all_tracked()
             .map_err(|e| e.to_string())?
     };
-    for node in tracked {
-        if !on_disk.contains(&node.rel_path) {
-            info!(rel_path = %node.rel_path, "tracked node missing on disk; deleting");
-            if let Err(e) = engine.handle_delete(&node.rel_path).await {
-                warn!(rel_path = %node.rel_path, error = %e, "reconcile delete failed");
-            }
+    let missing: Vec<Node> = tracked
+        .into_iter()
+        .filter(|n| !on_disk.contains(&n.rel_path))
+        .collect();
+
+    // Mass-delete guard (#3): a large-but-partial disappearance (an interrupted
+    // checkout, a case-fold rename, a botched rebase) shouldn't silently trash a big
+    // slice of the mirror. The whole-tree case is already caught above; here, once
+    // missing files exceed ~20% of a non-trivial tree, snapshot each page's current
+    // Notion body into the object store BEFORE trashing it, so the mass delete stays
+    // fully reversible, and log loudly.
+    let total = on_disk.len() + missing.len();
+    let ratio = if total == 0 {
+        0.0
+    } else {
+        missing.len() as f64 / total as f64
+    };
+    let mass_delete = missing.len() >= 5 && ratio > 0.20;
+    if mass_delete {
+        warn!(
+            missing = missing.len(),
+            total,
+            pct = (ratio * 100.0) as u32,
+            "large fraction of the mirror is missing on disk; snapshotting each page before trashing"
+        );
+    }
+    for node in &missing {
+        if mass_delete {
+            engine.snapshot_remote_before_delete(node).await;
+        }
+        info!(rel_path = %node.rel_path, "tracked node missing on disk; deleting");
+        if let Err(e) = engine.handle_delete(&node.rel_path).await {
+            warn!(rel_path = %node.rel_path, error = %e, "reconcile delete failed");
         }
     }
     info!("reconciliation complete");

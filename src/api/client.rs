@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use reqwest::{Method, Response, StatusCode};
 use serde::de::DeserializeOwned;
+use serde::Deserialize;
 use tracing::{debug, warn};
 
 use super::errors::{ApiError, NotionApiError};
@@ -233,6 +234,74 @@ impl NotionClient {
         let _: serde_json::Value = self.request_json(Method::DELETE, &path, None).await?;
         Ok(())
     }
+
+    /// POST /v1/search — page ids + last-edit timestamps, newest first, fully
+    /// paginated. The poller uses this as a cheap prefilter so it can skip unchanged
+    /// nodes without a GET /v1/pages per tracked file (#8). Pagination is capped so a
+    /// huge workspace can't turn one poll cycle into an unbounded scan; nodes beyond
+    /// the cap simply fall back to an individual fetch.
+    pub async fn search_pages_by_last_edited(&self) -> Result<Vec<(String, String)>, ApiError> {
+        const MAX_PAGES: u32 = 10; // up to ~1000 most-recently-edited pages
+        let mut out = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut fetched_pages = 0u32;
+        loop {
+            let mut body = serde_json::Map::new();
+            body.insert(
+                "filter".into(),
+                serde_json::json!({ "property": "object", "value": "page" }),
+            );
+            body.insert(
+                "sort".into(),
+                serde_json::json!({ "direction": "descending", "timestamp": "last_edited_time" }),
+            );
+            body.insert("page_size".into(), serde_json::json!(100));
+            if let Some(c) = &cursor {
+                body.insert("start_cursor".into(), serde_json::json!(c));
+            }
+            let resp: SearchResp = self
+                .request_json(
+                    Method::POST,
+                    "/v1/search",
+                    Some(&serde_json::Value::Object(body)),
+                )
+                .await?;
+            for p in resp.results {
+                out.push((p.id, p.last_edited_time));
+            }
+            fetched_pages += 1;
+            if resp.has_more && fetched_pages < MAX_PAGES {
+                match resp.next_cursor {
+                    Some(c) => cursor = Some(c),
+                    None => {
+                        warn!(
+                            fetched = out.len(),
+                            "search: has_more=true but next_cursor=null; truncating"
+                        );
+                        break;
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Minimal projection of POST /v1/search that we actually consume.
+#[derive(Debug, Deserialize)]
+struct SearchResp {
+    results: Vec<SearchPage>,
+    has_more: bool,
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchPage {
+    id: String,
+    #[serde(default)]
+    last_edited_time: String,
 }
 
 /// Exponential backoff with full jitter: base 500ms, doubling, capped at 30s.
