@@ -2,6 +2,7 @@
 //! when no subcommand is given) or hands off to a `cli` subcommand
 //! (backup/restore/history/log/diff/show/untrash/gc).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -67,6 +68,7 @@ async fn build_engine(config_path: &Path, bot_user_id: String) -> Result<Arc<Eng
         locks: notion_sync::sync::locks::PathLocks::new(),
         store: notion_sync::sync::snapshot::ObjectStore::new(&cfg.local_root),
         bot_user_id,
+        self_writes: Mutex::new(HashMap::new()),
     }))
 }
 
@@ -106,6 +108,7 @@ async fn run_daemon(config_path: &Path) -> Result<(), String> {
         locks: notion_sync::sync::locks::PathLocks::new(),
         store: notion_sync::sync::snapshot::ObjectStore::new(&cfg.local_root),
         bot_user_id,
+        self_writes: Mutex::new(HashMap::new()),
     });
 
     // Startup reconciliation (adopt existing pages, converge disk/state/Notion).

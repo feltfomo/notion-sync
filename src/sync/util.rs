@@ -38,7 +38,7 @@ pub async fn atomic_write(path: &Path, bytes: Vec<u8>) -> std::io::Result<()> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || atomic_write_blocking(&path, &bytes))
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+        .map_err(std::io::Error::other)?
 }
 
 pub struct WalkEntry {
@@ -117,7 +117,7 @@ pub fn parent_rel(rel_path: &str) -> String {
 pub async fn walk_async(root: PathBuf, ignore: Vec<String>) -> std::io::Result<Vec<WalkEntry>> {
     tokio::task::spawn_blocking(move || walk(&root, &ignore))
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+        .map_err(std::io::Error::other)?
 }
 
 /// File mtime in nanoseconds since the Unix epoch (a cheap local-change hint). Single

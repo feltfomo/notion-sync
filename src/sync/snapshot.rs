@@ -84,7 +84,7 @@ impl ObjectStore {
         let store = self.clone();
         tokio::task::spawn_blocking(move || store.put_blocking(&bytes))
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+            .map_err(std::io::Error::other)?
     }
 
     /// Async wrapper around `get_blocking`.
@@ -93,7 +93,7 @@ impl ObjectStore {
         let hash = hash.to_string();
         tokio::task::spawn_blocking(move || store.get_blocking(&hash))
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+            .map_err(std::io::Error::other)?
     }
 
     /// Mark/sweep: delete every object whose hash is not in `keep`. Returns

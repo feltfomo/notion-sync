@@ -13,37 +13,67 @@ Each file's bytes get wrapped in Notion code blocks so they round-trip exactly.
 ## Install
 
 There's no system dependency to chase down: TLS is rustls (no OpenSSL) and SQLite is
-bundled, so a single binary is all you need. Linux release binaries are dynamically
-linked against glibc (fine on Arch and most distros); for a fully static binary, build
-the `x86_64-unknown-linux-musl` target yourself.
+bundled, so a single binary is all you need. Start with Option A; the others are there
+if you'd rather not run a script, or want to build it yourself.
 
-### Prebuilt binaries (no toolchain needed)
+> **Note:** the *download* is easy, but `notion-sync` is a developer tool — finishing
+> setup still means creating a Notion integration token and editing a small config
+> file (see [Quickstart](#quickstart)). The steps below just get the program onto your
+> machine painlessly.
 
-Every [release](https://github.com/feltfomo/notion-sync/releases) attaches the
-`notion-sync` daemon and the `fidelity-probe` for x86_64 Linux. Download them, mark
-them executable, and drop them on your `$PATH`:
+### Option A — one-line installer (easiest)
+
+Paste this into a terminal:
 
 ```sh
-ver=v0.2.0
-base=https://github.com/feltfomo/notion-sync/releases/download/$ver
-curl -L -o notion-sync     $base/notion-sync
-curl -L -o fidelity-probe  $base/fidelity-probe
-chmod +x notion-sync fidelity-probe
-install -Dm755 notion-sync fidelity-probe -t ~/.local/bin   # or /usr/local/bin
+curl -fsSL https://raw.githubusercontent.com/feltfomo/notion-sync/main/scripts/install.sh | sh
 ```
 
-### With cargo (any distro)
+It picks the right build, downloads `notion-sync` and `fidelity-probe`, verifies they
+downloaded cleanly, and installs them to `~/.local/bin`. If that folder isn't on your
+`PATH` yet, it prints the one line to fix that. Done.
 
-Builds and installs both binaries into `~/.cargo/bin`. Needs a Rust toolchain
-(>= 1.74; `rustup` or `pacman -S rust` on Arch):
+Want to read it before trusting it? Have a look first:
+<https://github.com/feltfomo/notion-sync/blob/main/scripts/install.sh>
+
+### Option B — download by hand (no script)
+
+1. Open the latest release: <https://github.com/feltfomo/notion-sync/releases/latest>
+2. Under **Assets**, download these two files (the `musl` builds are static and run on
+   any Linux — when in doubt, pick these):
+   - `notion-sync-x86_64-unknown-linux-musl`
+   - `fidelity-probe-x86_64-unknown-linux-musl`
+3. Open a terminal in the folder you downloaded them to, then make them runnable and
+   move them somewhere your shell looks for programs:
+
+   ```sh
+   mkdir -p ~/.local/bin
+   mv notion-sync-x86_64-unknown-linux-musl    ~/.local/bin/notion-sync
+   mv fidelity-probe-x86_64-unknown-linux-musl ~/.local/bin/fidelity-probe
+   chmod +x ~/.local/bin/notion-sync ~/.local/bin/fidelity-probe
+   ```
+
+4. If `~/.local/bin` isn't on your `PATH`, add it once (bash shown — use your shell's
+   rc file):
+
+   ```sh
+   echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+   ```
+
+Prefer the smaller glibc build, or on an unusual setup? Grab the `-gnu` files instead
+— everything else is identical. And to confirm nothing got corrupted in transit,
+download `SHA256SUMS` into the same folder and run
+`sha256sum --check --ignore-missing SHA256SUMS`.
+
+### Option C — build it yourself
+
+With cargo (any distro; needs a Rust toolchain ≥ 1.74, e.g. `rustup` or `pacman -S rust`):
 
 ```sh
 cargo install --git https://github.com/feltfomo/notion-sync --tag v0.2.0
 ```
 
-From a local checkout, `cargo install --path .` does the same.
-
-### Build from source
+From a local checkout:
 
 ```sh
 git clone https://github.com/feltfomo/notion-sync
@@ -52,18 +82,29 @@ cargo build --release
 # binaries land in ./target/release/{notion-sync,fidelity-probe}
 ```
 
-### Nix flakes
+For a fully static binary yourself, build the musl target with
+[`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild) (it handles the
+bundled SQLite C cross-compile):
 
 ```sh
-nix run github:feltfomo/notion-sync               # run once
-nix profile install github:feltfomo/notion-sync   # install to your profile
+rustup target add x86_64-unknown-linux-musl
+cargo zigbuild --release --target x86_64-unknown-linux-musl
 ```
 
-On first run with no config, the daemon writes a starter
-`~/.config/notion-sync/config.toml`, prints which fields to edit, and exits. Edit
-`local_root` + `parent_page_id`, export `$NOTION_TOKEN`, then run it again.
+Or just try it once with Nix, no install:
+
+```sh
+nix run github:feltfomo/notion-sync
+```
+
+On NixOS, don't `nix profile install` it (that's imperative and doesn't carry across
+machines) — add it as a **flake input** and enable the module instead. See
+[NixOS (flake input + systemd service)](#nixos-flake-input--systemd-service) below.
 
 ## Quickstart
+
+On first run with no config, the daemon writes a starter
+`~/.config/notion-sync/config.toml`, prints which fields to edit, and exits.
 
 1. Create a Notion internal integration, copy its token, and **share the parent page
    with the integration** so it has write access.
@@ -147,22 +188,45 @@ parent_page_id = "0123456789abcdef0123456789abcdef"
 ignore         = [".git", "target", "node_modules", "*.lock", ".notion-sync"]
 ```
 
-## NixOS systemd user service
+## NixOS (flake input + systemd service)
 
-`flake.nix` exposes a package (`buildRustPackage`), a `nix run` app, and a NixOS
-module. The token is provided via `EnvironmentFile=` pointing at a `0600` secrets
-file (or `agenix` / `sops-nix`), and is **never** placed in the Nix store.
+On NixOS the right way to install this is as a **flake input** plus the bundled NixOS
+module — declarative, pinned by your `flake.lock`, and reproducible on every machine you
+deploy to. (`flake.nix` exposes a `buildRustPackage` package, a `nix run` app, and
+`nixosModules.default`.) The token is provided via `EnvironmentFile=` pointing at a
+`0600` secrets file (or `agenix` / `sops-nix`), and is **never** placed in the Nix store.
+
+Add the input to your system flake and wire the module into the host:
 
 ```nix
 {
-  imports = [ notion-sync.nixosModules.default ];
-  services.notion-sync = {
-    enable          = true;
-    configFile      = "/home/you/.config/notion-sync/config.toml";
-    environmentFile = "/run/secrets/notion-sync.env"; # contains NOTION_TOKEN=...
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    notion-sync.url = "github:feltfomo/notion-sync";
+    # reuse your nixpkgs so a second copy isn't built
+    notion-sync.inputs.nixpkgs.follows = "nixpkgs";
+  };
+
+  outputs = { nixpkgs, notion-sync, ... }: {
+    nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        notion-sync.nixosModules.default
+        {
+          services.notion-sync = {
+            enable          = true;
+            configFile      = "/home/you/.config/notion-sync/config.toml";
+            environmentFile = "/run/secrets/notion-sync.env"; # contains NOTION_TOKEN=...
+          };
+        }
+      ];
+    };
   };
 }
 ```
+
+Then `sudo nixos-rebuild switch`. Upgrade deliberately with
+`nix flake update notion-sync` (and roll back via your `flake.lock` like anything else).
 
 Module options, all under `services.notion-sync`:
 

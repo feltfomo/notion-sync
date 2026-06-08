@@ -24,3 +24,4 @@ result
 # If config.toml was already committed before this rule existed, untrack it
 # (this keeps your local copy) and commit the removal:
 #     git rm --cached config.toml && git commit -m "chore: stop tracking config.toml"
+dist/

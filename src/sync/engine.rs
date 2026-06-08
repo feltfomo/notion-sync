@@ -2,8 +2,10 @@
 //! Notion. The watcher and poller call into it; per-path locks serialize concurrent
 //! work on the same node.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -20,6 +22,11 @@ use crate::hashutil;
 use crate::language;
 use crate::state::{Node, NodeKind, State};
 
+/// How long a self-write record stays live. Generous relative to the watcher
+/// debounce/tick so the echoed filesystem event is always still suppressible, yet
+/// short enough that a genuine user edit landing seconds later is not swallowed.
+const SELF_WRITE_TTL: Duration = Duration::from_secs(10);
+
 pub struct Engine {
     pub cfg: Config,
     pub api: Arc<NotionClient>,
@@ -29,6 +36,11 @@ pub struct Engine {
     pub store: ObjectStore,
     /// Our own integration's bot user id, for echo-loop suppression.
     pub bot_user_id: String,
+    /// Paths the daemon itself just wrote to disk during a pull, mapped to
+    /// (hash_we_wrote, when). The local watcher consults this so it can tell its own
+    /// pull-writes apart from a user's edit and skip them, instead of relying on
+    /// sync_file's content_hash check winning a race against the pull's bookkeeping.
+    pub self_writes: Mutex<HashMap<String, (String, Instant)>>,
 }
 
 /// A page body read back from Notion. `foreign_blocks` counts children that are
@@ -44,6 +56,28 @@ pub struct PageBody {
 impl Engine {
     pub fn abs_path(&self, rel: &str) -> PathBuf {
         self.cfg.local_root.join(rel)
+    }
+
+    /// Record that the daemon just wrote `hash` to `rel_path` on disk (a pull
+    /// fast-forward), so the watcher can recognize and skip the filesystem event the
+    /// write triggers rather than echoing it straight back to Notion.
+    pub(crate) async fn note_self_write(&self, rel_path: &str, hash: &str) {
+        let mut map = self.self_writes.lock().await;
+        map.insert(rel_path.to_string(), (hash.to_string(), Instant::now()));
+    }
+
+    /// True if the daemon recently wrote exactly `current_hash` to `rel_path` itself.
+    /// Consumes the matching record and evicts expired ones so the map stays bounded.
+    pub(crate) async fn is_self_write(&self, rel_path: &str, current_hash: &str) -> bool {
+        let mut map = self.self_writes.lock().await;
+        map.retain(|_, (_, at)| at.elapsed() < SELF_WRITE_TTL);
+        match map.get(rel_path) {
+            Some((hash, _)) if hash == current_hash => {
+                map.remove(rel_path);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Snapshot `bytes` for `rel_path` into the content-addressed object store and
@@ -174,6 +208,15 @@ impl Engine {
         let content = String::from_utf8_lossy(&bytes).to_string();
         let hash = hashutil::hash_str(&content);
         let mtime_ns = util::file_mtime_ns(&abs);
+
+        // Echo guard: if this exact content is something the daemon just wrote to disk
+        // itself during a pull, the filesystem event was caused by our own write. Skip
+        // it instead of pushing the just-pulled content straight back to Notion. The
+        // watcher cannot otherwise tell its own pull-writes from a user edit, and this
+        // does not depend on the pull's state bookkeeping having committed yet.
+        if self.is_self_write(rel_path, &hash).await {
+            return Ok(());
+        }
 
         // Already up-to-date?
         let existing = { self.state.lock().await.get_by_path(rel_path).ok().flatten() };

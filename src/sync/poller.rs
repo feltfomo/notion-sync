@@ -1,15 +1,18 @@
 //! Notion poller. Periodically scans tracked file pages for external changes and
 //! pulls them down. Three efficiency/robustness measures layer on top of the basic
 //! scan:
-//!   * #8  one paginated POST /v1/search per cycle yields last-edit timestamps for
-//!         many pages at once, so unchanged nodes are skipped WITHOUT an individual
-//!         GET /v1/pages call (the old behavior was O(N) GETs every cycle).
-//!   * idle backoff: quiet cycles stretch the interval up to a cap; any detected
-//!         change snaps it back to the configured floor.
-//!   * #17 periodic root health-check: confirm the configured parent page is still
-//!         reachable so a revoked share / trashed root surfaces loudly.
-//! Echo-loop suppression still skips pages whose latest edit was authored by our own
-//! integration bot (we caused that edit ourselves).
+//!
+//! * #8 one paginated POST /v1/search per cycle yields last-edit timestamps for many
+//!   pages at once, so unchanged nodes are skipped WITHOUT an individual GET
+//!   /v1/pages call (the old behavior was O(N) GETs every cycle).
+//! * idle backoff: quiet cycles stretch the interval up to a cap; any detected change
+//!   snaps it back to the configured floor.
+//! * #17 periodic root health-check: confirm the configured parent page is still
+//!   reachable so a revoked share / trashed root surfaces loudly.
+//!
+//! Echo-loop suppression skips pages whose latest edit was authored by our own
+//! integration bot AND whose content still matches what we last synced; a bot-attributed
+//! page whose body has actually diverged (a human edit in the same window) is still pulled.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,6 +21,7 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use super::engine::Engine;
+use crate::hashutil;
 
 /// Run the root health-check once every this many poll cycles.
 const HEALTH_CHECK_EVERY: u32 = 20;
@@ -123,25 +127,38 @@ async fn poll_once(engine: &Arc<Engine>) -> Result<usize, String> {
             continue;
         }
 
-        // Echo suppression: the latest edit is ours.
+        // Echo suppression: the latest edit looks like ours (bot-authored).
         //
-        // Known v1 gap: this keys off `last_edited_by`, which Notion reports as the
-        // *most recent* editor only. If a human edits a page and one of our own writes
-        // lands in the same window, the page is attributed to the bot and the human edit
-        // is never pulled. Acceptable under local-wins for v1; revisit with per-edit
-        // attribution or a remote/local content-hash comparison if it bites in practice.
-        if page
+        // `last_edited_by` reports only the *most recent* editor, so a human edit that
+        // lands in the same window as one of our own writes is attributed to the bot.
+        // Trusting it alone silently drops that human edit. So when a page looks
+        // bot-authored we VERIFY by content: reassemble the remote body and compare its
+        // hash to what we last synced. Identical content is a true echo (skip); any
+        // divergence is a real edit we must still pull. A body we can't read cleanly
+        // (unreadable, or split into foreign blocks) is never treated as an echo -- we
+        // fall through so resolve_pull can handle or repair it.
+        let looks_self_authored = page
             .last_edited_by
             .as_ref()
             .map(|u| u.id == engine.bot_user_id)
-            .unwrap_or(false)
-        {
-            debug!(rel_path = %node.rel_path, "skipping self-authored edit (echo)");
-            // Still record the new timestamp so we don't re-evaluate it forever.
-            let mut updated = node.clone();
-            updated.notion_last_edited = Some(page.last_edited_time);
-            let _ = engine.state.lock().await.upsert(&updated);
-            continue;
+            .unwrap_or(false);
+        if looks_self_authored {
+            let is_echo = match engine.read_page_body(&node).await {
+                Ok(body) if body.foreign_blocks == 0 => {
+                    node.content_hash.as_deref()
+                        == Some(hashutil::hash_str(&body.text).as_str())
+                }
+                _ => false,
+            };
+            if is_echo {
+                debug!(rel_path = %node.rel_path, "skipping self-authored edit (content matches last sync)");
+                // Record the new timestamp so we don't re-evaluate it forever.
+                let mut updated = node.clone();
+                updated.notion_last_edited = Some(page.last_edited_time);
+                let _ = engine.state.lock().await.upsert(&updated);
+                continue;
+            }
+            debug!(rel_path = %node.rel_path, "bot-authored edit but content diverged from last sync; pulling");
         }
 
         info!(rel_path = %node.rel_path, "detected external Notion edit; pulling");

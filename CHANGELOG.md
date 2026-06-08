@@ -42,12 +42,15 @@ All notable changes to this project are documented here. The format is based on
 - fidelity-probe warns instead of silently dropping a failed probe-page trash.
 - Periodic health-check surfaces an unmounted `local_root`.
 - `state.rs` query helpers bind `query_map` iterators before `collect` (borrow fix).
+- **Echo-loop suppression.** The daemon tracks its own pull-writes in a short-TTL
+  self-write registry that the watcher consults before pushing, and the poller verifies
+  bot-attributed page edits by content hash instead of trusting the most-recent-editor
+  field alone. A human edit landing in the same window as one of our writes is no longer
+  misattributed, and the pull -> write -> re-push churn that could destabilize a page
+  while the daemon runs is eliminated.
 
 ### Known gaps
-- Echo suppression keys off the most recent editor only; a human edit immediately
-  followed by one of our writes can be misattributed (documented v1 gap).
 - No token re-auth on a mid-run 401 yet (`token_file` groundwork is in place).
-- Placeholder callout shows the warning emoji twice (cosmetic).
 
 ## [0.1.0]
 

@@ -56,6 +56,10 @@ pub async fn resolve_pull(engine: &Engine, node: &Node) -> anyhow_lite::Result {
                 local_bytes.clone(),
             )
             .await;
+        // Record this as our own write BEFORE touching disk so the local watcher can
+        // recognize the resulting filesystem event as an echo and skip it, instead of
+        // re-pushing the just-pulled content straight back to Notion.
+        engine.note_self_write(&node.rel_path, &notion_hash).await;
         // Clean fast-forward from Notion -> disk (async atomic write).
         util::atomic_write(&abs, notion_content.clone().into_bytes())
             .await
