@@ -17,6 +17,10 @@ pub struct RawConfig {
     pub conflict_policy: String,
     #[serde(default = "default_max_bytes")]
     pub max_file_bytes: u64,
+    /// Optional path to read the Notion token from. Used only when $NOTION_TOKEN is
+    /// unset/empty (sops / systemd LoadCredential friendly).
+    #[serde(default)]
+    pub token_file: Option<PathBuf>,
     pub mapping: RawMapping,
 }
 
@@ -53,8 +57,11 @@ pub struct Config {
     pub local_root: PathBuf,
     pub parent_page_id: String,
     pub ignore: Vec<String>,
-    /// Read from $NOTION_TOKEN, not from the file.
+    /// Resolved from $NOTION_TOKEN (preferred) or `token_file`.
     pub token: String,
+    /// Where the token came from, retained so the daemon can re-read it on a 401
+    /// without a restart.
+    pub token_file: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -105,11 +112,7 @@ impl Config {
                 raw.mapping.local_root.display()
             )));
         }
-        let token = std::env::var("NOTION_TOKEN")
-            .map_err(|_| ConfigError::Invalid("NOTION_TOKEN env var is not set".into()))?;
-        if token.trim().is_empty() {
-            return Err(ConfigError::Invalid("NOTION_TOKEN is empty".into()));
-        }
+        let token = load_token(raw.token_file.as_deref())?;
 
         Ok(Config {
             notion_version: raw.notion_version,
@@ -120,6 +123,7 @@ impl Config {
             parent_page_id: raw.mapping.parent_page_id,
             ignore: raw.mapping.ignore,
             token,
+            token_file: raw.token_file,
         })
     }
 }
@@ -142,6 +146,11 @@ pub fn is_ignored(rel_path: &std::path::Path, patterns: &[String]) -> bool {
 }
 
 fn glob_match(pattern: &str, name: &str) -> bool {
+    // `*foo*` => contains. Must be checked BEFORE the single-ended cases, otherwise
+    // the leading-`*` branch wins and matches against the literal trailing `*`.
+    if pattern.len() >= 2 && pattern.starts_with('*') && pattern.ends_with('*') {
+        return name.contains(&pattern[1..pattern.len() - 1]);
+    }
     if let Some(suffix) = pattern.strip_prefix('*') {
         return name.ends_with(suffix);
     }
@@ -149,4 +158,37 @@ fn glob_match(pattern: &str, name: &str) -> bool {
         return name.starts_with(prefix);
     }
     pattern == name
+}
+
+/// Resolve the Notion integration token. Precedence: $NOTION_TOKEN, then the optional
+/// `token_file` path. Kept standalone (and `pub`) so the daemon can re-read the token
+/// on a 401 without restarting.
+pub fn load_token(token_file: Option<&std::path::Path>) -> Result<String, ConfigError> {
+    if let Ok(tok) = std::env::var("NOTION_TOKEN") {
+        if !tok.trim().is_empty() {
+            return Ok(tok.trim().to_string());
+        }
+    }
+    if let Some(path) = token_file {
+        let tok = std::fs::read_to_string(path).map_err(|e| {
+            ConfigError::Invalid(format!(
+                "NOTION_TOKEN is unset and token_file {} could not be read: {e}",
+                path.display()
+            ))
+        })?;
+        let tok = tok.trim().to_string();
+        if tok.is_empty() {
+            return Err(ConfigError::Invalid(format!(
+                "token_file {} is empty",
+                path.display()
+            )));
+        }
+        return Ok(tok);
+    }
+    Err(ConfigError::Invalid(
+        "No Notion token found. Set $NOTION_TOKEN (or `token_file` in config): create an \
+         integration at https://www.notion.so/my-integrations, share the parent page with \
+         it, export the token (export NOTION_TOKEN=secret_...), then see the README Quickstart."
+            .into(),
+    ))
 }

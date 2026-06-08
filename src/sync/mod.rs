@@ -6,6 +6,7 @@ pub mod engine;
 pub mod locks;
 pub mod poller;
 pub mod reconcile;
+pub mod snapshot;
 pub mod util;
 pub mod watcher;
 

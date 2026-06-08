@@ -13,7 +13,8 @@ pub fn looks_binary(bytes: &[u8]) -> bool {
 }
 
 // temp + fsync + rename: a crash mid-write can't leave a partial file in place.
-pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+// Blocking; from the async runtime use `atomic_write` (below) so the worker isn't stalled.
+pub fn atomic_write_blocking(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir)?;
@@ -29,6 +30,15 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Async wrapper: routes the blocking atomic write through spawn_blocking so disk I/O
+/// never stalls an async worker thread.
+pub async fn atomic_write(path: &Path, bytes: Vec<u8>) -> std::io::Result<()> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || atomic_write_blocking(&path, &bytes))
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
 }
 
 pub struct WalkEntry {
@@ -100,4 +110,21 @@ pub fn parent_rel(rel_path: &str) -> String {
         Some((parent, _)) => parent.to_string(),
         None => String::new(),
     }
+}
+
+/// Async wrapper around `walk`: the recursive read_dir is blocking, so run it on the
+/// blocking pool to keep the reconcile pass off the async worker threads.
+pub async fn walk_async(root: PathBuf, ignore: Vec<String>) -> std::io::Result<Vec<WalkEntry>> {
+    tokio::task::spawn_blocking(move || walk(&root, &ignore))
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+}
+
+/// File mtime in nanoseconds since the Unix epoch (a cheap local-change hint). Single
+/// home for what used to be copy-pasted into engine.rs and conflict.rs.
+pub fn file_mtime_ns(path: &Path) -> Option<i64> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta.modified().ok()?;
+    let dur = mtime.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(dur.as_nanos() as i64)
 }

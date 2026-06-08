@@ -28,6 +28,9 @@ impl std::error::Error for NotionApiError {}
 pub enum ApiError {
     /// A non-retryable API error (4xx other than 409/429) with full context.
     Api(NotionApiError),
+    /// 401 Unauthorized that survived a one-shot token reload: the token is revoked or
+    /// expired and the daemon should stop rather than 401 every request forever.
+    Unauthorized(NotionApiError),
     /// Transport/IO failure from reqwest.
     Transport(String),
     /// Body could not be (de)serialized.
@@ -40,6 +43,7 @@ impl fmt::Display for ApiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ApiError::Api(e) => write!(f, "{e}"),
+            ApiError::Unauthorized(e) => write!(f, "unauthorized: {e}"),
             ApiError::Transport(e) => write!(f, "transport error: {e}"),
             ApiError::Serde(e) => write!(f, "serialization error: {e}"),
             ApiError::RetriesExhausted(e) => write!(f, "retries exhausted: {e}"),

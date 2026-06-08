@@ -34,6 +34,10 @@ toml = "0.8"
 # bundled => compiles SQLite from source, no system libsqlite dependency.
 rusqlite = { version = "0.31", features = ["bundled"] }
 blake3 = "1"
+# gzip for the content-addressed snapshot store (compress-at-rest + dedup by hash).
+flate2 = "1"
+# Declarative CLI parsing for the backup/restore subcommands.
+clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

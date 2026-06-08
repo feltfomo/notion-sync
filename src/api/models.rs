@@ -135,8 +135,21 @@ pub struct PageResp {
     pub last_edited_time: String,
     #[serde(default)]
     pub last_edited_by: Option<PartialUser>,
+    /// `in_trash` is the trash flag on `2022-06-28` (added Apr 2024) and later.
     #[serde(default)]
     pub in_trash: bool,
+    /// Older readback field; some API versions still echo `archived` alongside (or
+    /// instead of) `in_trash`. Treated as equivalent for trash detection.
+    #[serde(default)]
+    pub archived: Option<bool>,
+}
+
+impl PageResp {
+    /// True if the page is trashed/archived, tolerant of which field the pinned API
+    /// version actually populates.
+    pub fn trashed(&self) -> bool {
+        self.in_trash || self.archived.unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]

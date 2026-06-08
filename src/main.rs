@@ -65,6 +65,7 @@ async fn run() -> Result<(), String> {
         api,
         state,
         locks: notion_sync::sync::locks::PathLocks::new(),
+        store: notion_sync::sync::snapshot::ObjectStore::new(&cfg.local_root),
         bot_user_id,
     });
 

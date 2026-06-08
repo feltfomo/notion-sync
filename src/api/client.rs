@@ -210,6 +210,14 @@ impl NotionClient {
             if resp.has_more {
                 cursor = resp.next_cursor;
                 if cursor.is_none() {
+                    // Notion promised more pages but gave us no cursor. Surface it:
+                    // silently breaking here would drop children and could cause a
+                    // destructive partial readback elsewhere.
+                    warn!(
+                        block_id,
+                        fetched = out.len(),
+                        "list_children: has_more=true but next_cursor=null; listing truncated"
+                    );
                     break;
                 }
             } else {
@@ -241,6 +249,9 @@ fn backoff_with_jitter(attempt: u32) -> Duration {
     Duration::from_millis(jitter)
 }
 
+/// Parse `Retry-After`. Notion only ever sends an integer number of seconds, so the
+/// RFC 7231 HTTP-date form is deliberately not handled; if it ever appears we return
+/// `None` and the caller falls back to jittered exponential backoff.
 fn parse_retry_after(resp: &Response) -> Option<Duration> {
     resp.headers()
         .get(reqwest::header::RETRY_AFTER)
