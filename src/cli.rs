@@ -131,8 +131,6 @@ pub async fn dispatch(engine: Arc<Engine>, command: Command) -> Result<(), Strin
     }
 }
 
-// --- snapshot/time resolution --------------------------------------------------
-
 /// Resolve a single snapshot for `path` from an optional `--at` spec:
 ///   * none           => the newest snapshot,
 ///   * all-digits     => that snapshot id (must belong to `path`),
@@ -200,8 +198,6 @@ fn short(h: &Option<String>) -> String {
         None => "-".to_string(),
     }
 }
-
-// --- commands ------------------------------------------------------------------
 
 async fn log_cmd(engine: &Arc<Engine>, path: Option<&str>, limit: usize) -> Result<(), String> {
     let rows = {

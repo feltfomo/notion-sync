@@ -279,8 +279,6 @@ impl State {
         Ok(removed)
     }
 
-    // --- snapshot index (v2 schema) -------------------------------------------
-
     /// Record a snapshot row. The bytes themselves live in the content-addressed
     /// object store keyed by `blake3`; this is only the index entry.
     pub fn insert_snapshot(
@@ -363,8 +361,6 @@ impl State {
         tx.commit()?;
         Ok(removed)
     }
-
-    // --- append-only sync journal (v2 schema) ---------------------------------
 
     /// Append a journal row describing one sync action: the audit trail that makes a
     /// restore trustworthy ("what clobbered this file at 2am?").

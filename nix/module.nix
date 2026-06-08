@@ -5,7 +5,6 @@
 #   imports = [ inputs.notion-sync.nixosModules.default ];
 #   services.notion-sync = {
 #     enable = true;
-#     user = "alice";
 #     configFile = "/home/alice/.config/notion-sync/config.toml";
 #     environmentFile = "/home/alice/.config/notion-sync/token.env"; # 0600, contains NOTION_TOKEN=...
 #   };

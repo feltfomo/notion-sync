@@ -31,7 +31,7 @@ impl NotionClient {
         limiter: Arc<RateLimiter>,
     ) -> Result<Self, ApiError> {
         let http = reqwest::Client::builder()
-            .user_agent("notion-sync/0.1")
+            .user_agent("notion-sync/0.2")
             .build()?;
         Ok(NotionClient {
             http,
@@ -129,13 +129,13 @@ impl NotionClient {
         }
     }
 
-    /// GET /v1/users/me — learn our own bot user id (echo-loop suppression).
+    /// GET /v1/users/me: learn our own bot user id (echo-loop suppression).
     pub async fn whoami(&self) -> Result<String, ApiError> {
         let me: MeResp = self.request_json(Method::GET, "/v1/users/me", None).await?;
         Ok(me.id)
     }
 
-    /// POST /v1/pages — create a subpage under `parent_page_id` with `title`.
+    /// POST /v1/pages: create a subpage under `parent_page_id` with `title`.
     /// Optional initial `children` blocks (e.g. binary placeholder callout).
     pub async fn create_page(
         &self,
@@ -157,7 +157,7 @@ impl NotionClient {
         self.request_json(Method::GET, &path, None).await
     }
 
-    /// PATCH /v1/pages/{id} — rename (title) and/or reparent.
+    /// PATCH /v1/pages/{id}: rename (title) and/or reparent.
     pub async fn update_page(
         &self,
         page_id: &str,
@@ -184,7 +184,7 @@ impl NotionClient {
             .await
     }
 
-    /// PATCH /v1/blocks/{id}/children — append up to 100 blocks per call.
+    /// PATCH /v1/blocks/{id}/children: append up to 100 blocks per call.
     pub async fn append_children(
         &self,
         block_id: &str,
@@ -197,7 +197,7 @@ impl NotionClient {
         Ok(resp.results.into_iter().map(|b| b.id).collect())
     }
 
-    /// GET /v1/blocks/{id}/children — fully paginated.
+    /// GET /v1/blocks/{id}/children: fully paginated.
     pub async fn list_children(&self, block_id: &str) -> Result<Vec<BlockResp>, ApiError> {
         let mut out = Vec::new();
         let mut cursor: Option<String> = None;
@@ -228,14 +228,14 @@ impl NotionClient {
         Ok(out)
     }
 
-    /// DELETE /v1/blocks/{id} — moves the block to trash (overwrite strategy).
+    /// DELETE /v1/blocks/{id}: moves the block to trash (overwrite strategy).
     pub async fn delete_block(&self, block_id: &str) -> Result<(), ApiError> {
         let path = format!("/v1/blocks/{block_id}");
         let _: serde_json::Value = self.request_json(Method::DELETE, &path, None).await?;
         Ok(())
     }
 
-    /// POST /v1/search — page ids + last-edit timestamps, newest first, fully
+    /// POST /v1/search: page ids + last-edit timestamps, newest first, fully
     /// paginated. The poller uses this as a cheap prefilter so it can skip unchanged
     /// nodes without a GET /v1/pages per tracked file (#8). Pagination is capped so a
     /// huge workspace can't turn one poll cycle into an unbounded scan; nodes beyond

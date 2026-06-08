@@ -188,7 +188,7 @@ pub fn load_token(token_file: Option<&std::path::Path>) -> Result<String, Config
     Err(ConfigError::Invalid(
         "No Notion token found. Set $NOTION_TOKEN (or `token_file` in config): create an \
          integration at https://www.notion.so/my-integrations, share the parent page with \
-         it, export the token (export NOTION_TOKEN=secret_...), then see the README Quickstart."
+         it, export the token (export NOTION_TOKEN=ntn_...), then see the README Quickstart."
             .into(),
     ))
 }

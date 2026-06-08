@@ -18,6 +18,10 @@ conflict_policy = "local-wins"
 # Maximum file size to sync, bytes. Larger files are skipped with a placeholder page.
 max_file_bytes = 5000000
 
+# Optional path to a file containing the Notion token. Read only when $NOTION_TOKEN is
+# unset or empty (sops-nix / systemd LoadCredential friendly).
+# token_file = "/run/secrets/notion-token"
+
 [mapping]
 # The local directory tree to mirror (source of truth).
 local_root = "/home/user/projects/myapp"
