@@ -12,21 +12,36 @@ Each file's bytes get wrapped in Notion code blocks so they round-trip exactly.
 
 ## Install
 
-### Run it (Nix flakes)
+There's no system dependency to chase down: TLS is rustls (no OpenSSL) and SQLite is
+bundled, so a single binary is all you need. Linux release binaries are dynamically
+linked against glibc (fine on Arch and most distros); for a fully static binary, build
+the `x86_64-unknown-linux-musl` target yourself.
+
+### Prebuilt binaries (no toolchain needed)
+
+Every [release](https://github.com/feltfomo/notion-sync/releases) attaches the
+`notion-sync` daemon and the `fidelity-probe` for x86_64 Linux. Download them, mark
+them executable, and drop them on your `$PATH`:
 
 ```sh
-nix run github:feltfomo/notion-sync
+ver=v0.2.0
+base=https://github.com/feltfomo/notion-sync/releases/download/$ver
+curl -L -o notion-sync     $base/notion-sync
+curl -L -o fidelity-probe  $base/fidelity-probe
+chmod +x notion-sync fidelity-probe
+install -Dm755 notion-sync fidelity-probe -t ~/.local/bin   # or /usr/local/bin
 ```
 
-On first run with no config, it writes a starter `~/.config/notion-sync/config.toml`,
-prints which fields to edit, and exits. Edit `local_root` + `parent_page_id`, export
-`$NOTION_TOKEN`, then run it again.
+### With cargo (any distro)
 
-### Install to your profile
+Builds and installs both binaries into `~/.cargo/bin`. Needs a Rust toolchain
+(>= 1.74; `rustup` or `pacman -S rust` on Arch):
 
 ```sh
-nix profile install github:feltfomo/notion-sync
+cargo install --git https://github.com/feltfomo/notion-sync --tag v0.2.0
 ```
+
+From a local checkout, `cargo install --path .` does the same.
 
 ### Build from source
 
@@ -34,7 +49,19 @@ nix profile install github:feltfomo/notion-sync
 git clone https://github.com/feltfomo/notion-sync
 cd notion-sync
 cargo build --release
+# binaries land in ./target/release/{notion-sync,fidelity-probe}
 ```
+
+### Nix flakes
+
+```sh
+nix run github:feltfomo/notion-sync               # run once
+nix profile install github:feltfomo/notion-sync   # install to your profile
+```
+
+On first run with no config, the daemon writes a starter
+`~/.config/notion-sync/config.toml`, prints which fields to edit, and exits. Edit
+`local_root` + `parent_page_id`, export `$NOTION_TOKEN`, then run it again.
 
 ## Quickstart
 
