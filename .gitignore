@@ -20,3 +20,4 @@ result
 
 # NOTE: Cargo.lock is intentionally committed (this is a binary; the flake's
 # cargoLock.lockFile = ./Cargo.lock needs it for reproducible builds).
+config.toml

@@ -2,11 +2,11 @@
 
 A background daemon that keeps a local directory and a Notion page tree in two-way
 sync. **The local filesystem is the source of truth** (local-wins). Notion becomes a
-mirror you can read, comment on, and lightly edit from anywhere — the files on disk
+mirror you can read, comment on, and lightly edit from anywhere. The files on disk
 always win.
 
-It mirrors any UTF-8 text files code, Markdown, config, prose — not just code. Each
-file's bytes are wrapped in Notion code blocks so they round-trip exactly.
+It mirrors any UTF-8 text file, not just code: Markdown, config, prose, whatever.
+Each file's bytes get wrapped in Notion code blocks so they round-trip exactly.
 
 ---
 
@@ -40,7 +40,7 @@ cargo build --release
 
 1. Create a Notion internal integration, copy its token, and **share the parent page
    with the integration** so it has write access.
-2. Export the token (it is never read from the config file):
+2. Export the token (it's never read from the config file):
 
    ```sh
    set -x NOTION_TOKEN ntn_xxx     # fish
@@ -104,7 +104,7 @@ compensate deterministically before write-back is enabled.
 
 ## Configuration (`config.toml`)
 
-The Notion token is **never** in this file — it comes from `$NOTION_TOKEN`. See
+The Notion token is **never** in this file; it comes from `$NOTION_TOKEN`. See
 `config.example.toml` for the annotated template.
 
 ```toml
@@ -137,9 +137,20 @@ file (or `agenix` / `sops-nix`), and is **never** placed in the Nix store.
 }
 ```
 
+Module options, all under `services.notion-sync`:
+
+| Option | Type | Default | What it does |
+| --- | --- | --- | --- |
+| `enable` | bool | `false` | Turn the user service on. |
+| `package` | package | the flake's `notion-sync` | The build to run; override to pin or patch. |
+| `configFile` | path | _required_ | Absolute path to your `config.toml`, passed as `--config`. |
+| `environmentFile` | path | _required_ | `0600` file holding `NOTION_TOKEN=...`, loaded by systemd at start and never written to the Nix store. |
+| `logLevel` | string | `"info"` | Sets `RUST_LOG` for the unit: `error`, `warn`, `info`, `debug`, or `trace`. |
+
 The unit runs as a **user service** (so `$HOME` / `$XDG_STATE_HOME` resolve to your
 account), restarts on failure, and shuts down gracefully on `SIGTERM`. On a headless
-box, run `loginctl enable-linger <user>` so it runs without an active login session.
+box it needs lingering to run without an active login session: set
+`users.users.<name>.linger = true;` declaratively, or run `loginctl enable-linger <user>`.
 
 ## State & limitations
 
@@ -151,9 +162,9 @@ box, run `loginctl enable-linger <user>` so it runs without an active login sess
   (which carries its own code fences) can split the mirror. The daemon detects this
   and refuses the pull (force-pushing local instead), but the safe habit is to treat
   `.md` mirror pages as read-only.
-- **Multi-machine is out of scope for v1.** `state.db` is intentionally local; do not
+- **Multi-machine is out of scope for v1.** `state.db` is intentionally local; don't
   run two daemons against the same Notion tree from different machines.
-- Trashed-block cleanup is not implemented — Notion auto-purges trash after 30 days.
+- Trashed-block cleanup isn't implemented; Notion auto-purges trash after 30 days anyway.
 
 ## Layout
 
@@ -166,12 +177,16 @@ src/
   config.rs   TOML loader + ignore globs
   state.rs    SQLite state.db
   sync/       engine, watcher, poller, conflict, reconcile, locks, util
+  lib.rs      crate root that wires the modules together
   main.rs     daemon entrypoint (reconcile -> watcher + poller, SIGTERM)
-  bin/fidelity_probe.rs   the Step-1 fidelity gate
-tests/        chunk_roundtrip, state_db, integration (live, credential-gated)
-nix/module.nix, flake.nix   NixOS packaging
+  bin/fidelity_probe.rs   the standalone fidelity gate
+nix/module.nix  NixOS user-service module
+flake.nix       package + run app + NixOS module outputs
 ```
+
+Unit tests live inline as `#[cfg(test)]` modules (see `chunk.rs`, `state.rs`); the
+fidelity probe is the live, credential-gated check, not a `cargo test` target.
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+MIT. See [LICENSE](./LICENSE).
