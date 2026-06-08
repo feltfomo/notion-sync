@@ -124,6 +124,12 @@ async fn poll_once(engine: &Arc<Engine>) -> Result<usize, String> {
         }
 
         // Echo suppression: the latest edit is ours.
+        //
+        // Known v1 gap: this keys off `last_edited_by`, which Notion reports as the
+        // *most recent* editor only. If a human edits a page and one of our own writes
+        // lands in the same window, the page is attributed to the bot and the human edit
+        // is never pulled. Acceptable under local-wins for v1; revisit with per-edit
+        // attribution or a remote/local content-hash comparison if it bites in practice.
         if page
             .last_edited_by
             .as_ref()
@@ -151,6 +157,14 @@ async fn poll_once(engine: &Arc<Engine>) -> Result<usize, String> {
 /// #17: confirm the configured root page is still reachable; a revoked share or a
 /// trashed root otherwise manifests only as confusing per-file failures.
 async fn health_check(engine: &Arc<Engine>) {
+    // Local side: an unmount or impermanence wipe leaves local_root gone. Surface it
+    // once here instead of as a storm of per-file ENOENT errors during sync (#17 local).
+    if !engine.cfg.local_root.is_dir() {
+        warn!(
+            root = %engine.cfg.local_root.display(),
+            "root health-check: local_root is missing or not a directory"
+        );
+    }
     match engine.api.get_page(&engine.cfg.parent_page_id).await {
         Ok(p) if p.trashed() => warn!(
             parent = %engine.cfg.parent_page_id,

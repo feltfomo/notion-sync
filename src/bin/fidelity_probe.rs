@@ -69,8 +69,11 @@ async fn run() -> Result<(), String> {
         .collect();
     let readback = chunk::reassemble(&per_block);
 
-    // Trash the probe page (best effort).
-    let _ = api.update_page(&page.id, None, None, Some(true)).await;
+    // Trash the probe page (best effort, but log it: a leaked probe page is noise the
+    // operator should know to clean up).
+    if let Err(e) = api.update_page(&page.id, None, None, Some(true)).await {
+        tracing::warn!(page_id = %page.id, error = %e, "failed to trash probe page; remove it manually");
+    }
 
     if readback == payload {
         println!(

@@ -283,7 +283,7 @@ impl Engine {
         // Pre-push backup: save the current Notion body before overwriting it, so a bad
         // local edit that clobbers good remote content stays recoverable. This costs one
         // extra read round-trip per overwrite (acknowledged in the design notes) and is
-        // best-effort — a capture failure never blocks the push.
+        // best-effort, so a capture failure never blocks the push.
         let prev_hash = match self.read_page_body(node).await {
             Ok(body) => {
                 self.capture(
@@ -306,6 +306,11 @@ impl Engine {
         // leaves the old body intact; the worst case is a transient duplicate that the
         // next successful sync cleans up. Notion appends children in order at the end of
         // the page, so the new blocks form a contiguous, correctly-ordered body.
+        //
+        // We trash only the tracked body blocks, not arbitrary children: human-added
+        // foreign blocks are intentionally left untouched on a plain push. They are
+        // detected on the next pull (read_page_body's foreign_blocks count) and cleaned
+        // by the force_push rebuild in resolve_pull, which deletes every child (#19).
         let old_block_ids = node.body_block_ids.clone();
         let block_ids = self
             .append_body(&node.notion_page_id, content, rel_path)
@@ -424,7 +429,7 @@ impl Engine {
             warn!(rel_path, error = %e, "failed to trash page");
         }
         // Trashing a directory page also trashes every descendant page in Notion, so
-        // the matching state rows must be removed too — otherwise they linger as
+        // the matching state rows must be removed too, otherwise they linger as
         // orphans pointing at trashed pages and the poller keeps probing them (#5).
         // For a plain file, delete_subtree matches only its own row.
         let removed = {
@@ -497,7 +502,7 @@ impl Engine {
         }
     }
 
-    /// Create/refresh a binary (or oversized) placeholder page — no body, warning callout.
+    /// Create/refresh a binary (or oversized) placeholder page: no body, warning callout.
     async fn ensure_placeholder(
         &self,
         rel_path: &str,
@@ -523,8 +528,8 @@ impl Engine {
 
         // If a real page already exists at this path (a file that used to be text and
         // is now binary/oversized, or an adopted page), REUSE it. Creating a fresh page
-        // would orphan the original, leaving an untrashed duplicate racing for the path
-        // — exactly the bug this guards against (#2).
+        // would orphan the original, leaving an untrashed duplicate racing for the path,
+        // exactly the bug this guards against (#2).
         if let Some(node) = existing {
             match self.api.get_page(&node.notion_page_id).await {
                 Ok(page) if !page.trashed() => {

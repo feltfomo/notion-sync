@@ -49,7 +49,13 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
     info!(root = %root.display(), "watching local tree");
 
     let debounce = Duration::from_millis(engine.cfg.debounce_ms);
-    let mut pending: HashMap<String, Instant> = HashMap::new();
+    // Max-wait cap: a continuously-written file keeps pushing its debounce deadline out
+    // forever and would never sync. Fire at the earlier of (last_event + debounce) and
+    // (first_event + MAX_WAIT_MULT * debounce) so steady writers still flush periodically.
+    const MAX_WAIT_MULT: u32 = 10;
+    let max_wait = debounce.saturating_mul(MAX_WAIT_MULT);
+    // rel -> (soft deadline from last event, hard cap from first event)
+    let mut pending: HashMap<String, (Instant, Instant)> = HashMap::new();
     let mut tick = tokio::time::interval(Duration::from_millis(150));
 
     loop {
@@ -63,14 +69,18 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                         continue;
                     }
                     debug!(rel, "debouncing event");
-                    pending.insert(rel, Instant::now() + debounce);
+                    let now = Instant::now();
+                    pending
+                        .entry(rel)
+                        .and_modify(|(deadline, _cap)| *deadline = now + debounce)
+                        .or_insert((now + debounce, now + max_wait));
                 }
             }
             _ = tick.tick() => {
                 let now = Instant::now();
                 let ready: Vec<String> = pending
                     .iter()
-                    .filter(|(_, deadline)| **deadline <= now)
+                    .filter(|(_, (deadline, cap))| *deadline <= now || *cap <= now)
                     .map(|(p, _)| p.clone())
                     .collect();
                 for rel in ready {
