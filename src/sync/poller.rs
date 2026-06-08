@@ -171,6 +171,8 @@ async fn health_check(engine: &Arc<Engine>) {
             "root health-check: configured parent page is in trash"
         ),
         Ok(_) => debug!("root health-check ok"),
-        Err(e) => warn!(parent = %engine.cfg.parent_page_id, error = %e, "root health-check failed"),
+        Err(e) => {
+            warn!(parent = %engine.cfg.parent_page_id, error = %e, "root health-check failed")
+        }
     }
 }

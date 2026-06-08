@@ -83,7 +83,9 @@ impl State {
     /// (which can never ALTER). An existing v0.1 DB has user_version 0 and a `nodes`
     /// table; step 1's CREATE ... IF NOT EXISTS is then a harmless no-op.
     fn migrate(&self) -> rusqlite::Result<()> {
-        let version: i64 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        let version: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?;
 
         if version < 1 {
             // v1: the file <-> page mapping table.
@@ -298,7 +300,11 @@ impl State {
         Ok(self.conn.last_insert_rowid())
     }
 
-    pub fn list_snapshots(&self, rel_path: &str, limit: usize) -> rusqlite::Result<Vec<SnapshotRow>> {
+    pub fn list_snapshots(
+        &self,
+        rel_path: &str,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<SnapshotRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, rel_path, page_id, side, blake3, size_bytes, reason, captured_at \
              FROM snapshot WHERE rel_path = ?1 ORDER BY captured_at DESC, id DESC LIMIT ?2",
@@ -630,8 +636,14 @@ mod tests {
     #[test]
     fn journal_appends_and_filters_by_path() {
         let st = State::open_in_memory().unwrap();
-        st.insert_journal("a.rs", "push_overwrite", Some("old"), Some("new"), "to_notion")
-            .unwrap();
+        st.insert_journal(
+            "a.rs",
+            "push_overwrite",
+            Some("old"),
+            Some("new"),
+            "to_notion",
+        )
+        .unwrap();
         st.insert_journal("b.rs", "create", None, Some("x"), "to_notion")
             .unwrap();
         assert_eq!(st.list_journal(None, 10).unwrap().len(), 2);

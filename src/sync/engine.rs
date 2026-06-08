@@ -437,7 +437,8 @@ impl Engine {
             st.delete_subtree(rel_path).map_err(|e| e.to_string())?
         };
         for n in &removed {
-            self.journal(&n.rel_path, "delete", None, None, "to_notion").await;
+            self.journal(&n.rel_path, "delete", None, None, "to_notion")
+                .await;
         }
         info!(
             rel_path,
@@ -469,7 +470,8 @@ impl Engine {
         }
         let removed = {
             let st = self.state.lock().await;
-            st.delete_subtree(&node.rel_path).map_err(|e| e.to_string())?
+            st.delete_subtree(&node.rel_path)
+                .map_err(|e| e.to_string())?
         };
         for n in &removed {
             self.journal(&n.rel_path, "remote_delete", None, None, "from_notion")
@@ -560,7 +562,10 @@ impl Engine {
                     updated.is_binary_placeholder = true;
                     let st = self.state.lock().await;
                     st.upsert(&updated).map_err(|e| e.to_string())?;
-                    info!(rel_path, reason, "converted existing page to binary/oversized placeholder");
+                    info!(
+                        rel_path,
+                        reason, "converted existing page to binary/oversized placeholder"
+                    );
                     return Ok(());
                 }
                 _ => {} // page gone/trashed: fall through and create a fresh one

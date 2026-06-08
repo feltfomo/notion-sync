@@ -150,7 +150,9 @@ async fn resolve_snapshot(
             .next()
             .ok_or_else(|| format!("no snapshots recorded for {path}")),
         Some(spec) if spec.chars().all(|c| c.is_ascii_digit()) && !spec.is_empty() => {
-            let id: i64 = spec.parse().map_err(|_| format!("bad snapshot id {spec}"))?;
+            let id: i64 = spec
+                .parse()
+                .map_err(|_| format!("bad snapshot id {spec}"))?;
             st.snapshot_by_id(id)
                 .map_err(|e| e.to_string())?
                 .filter(|s| s.rel_path == path)
@@ -286,10 +288,16 @@ async fn diff_cmd(engine: &Arc<Engine>, path: &str, at: Option<&str>) -> Result<
     let old = String::from_utf8_lossy(&old_bytes);
     let new = String::from_utf8_lossy(&new_bytes);
     if old == new {
-        println!("no differences (snapshot {} matches current {path})", snap.id);
+        println!(
+            "no differences (snapshot {} matches current {path})",
+            snap.id
+        );
         return Ok(());
     }
-    println!("--- snapshot {} ({}, {})", snap.id, snap.captured_at, snap.side);
+    println!(
+        "--- snapshot {} ({}, {})",
+        snap.id, snap.captured_at, snap.side
+    );
     println!("+++ local {path}");
     print_block_diff(&old, &new);
     Ok(())
@@ -345,7 +353,9 @@ async fn restore_cmd(
     }
     // Snapshot the current local copy first so the restore is itself reversible.
     if let Ok(cur) = tokio::fs::read(&abs).await {
-        engine.capture(path, None, "local", "pre-restore", cur).await;
+        engine
+            .capture(path, None, "local", "pre-restore", cur)
+            .await;
     }
     if let Some(parent) = abs.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
@@ -359,7 +369,10 @@ async fn restore_cmd(
         .await
         .map_err(|e| e.to_string())?;
     info!(path, snapshot = snap.id, "restored file from snapshot");
-    println!("restored {path} from snapshot {} ({})", snap.id, snap.captured_at);
+    println!(
+        "restored {path} from snapshot {} ({})",
+        snap.id, snap.captured_at
+    );
     println!("local-wins: the daemon (or next `run`) will push this back to Notion.");
     Ok(())
 }
@@ -375,7 +388,10 @@ async fn backup_cmd(engine: &Arc<Engine>, path: &str, dry_run: bool) -> Result<(
     }
     let page_id = {
         let st = engine.state.lock().await;
-        st.get_by_path(path).ok().flatten().map(|n| n.notion_page_id)
+        st.get_by_path(path)
+            .ok()
+            .flatten()
+            .map(|n| n.notion_page_id)
     };
     match engine
         .capture(path, page_id.as_deref(), "local", "manual", bytes)
@@ -427,7 +443,9 @@ async fn gc_cmd(
     if dry_run {
         let referenced = {
             let st = engine.state.lock().await;
-            st.distinct_snapshot_hashes().map_err(|e| e.to_string())?.len()
+            st.distinct_snapshot_hashes()
+                .map_err(|e| e.to_string())?
+                .len()
         };
         println!(
             "[dry-run] would prune snapshot rows older than {cutoff} (keep_min={keep_min} per \
@@ -437,7 +455,8 @@ async fn gc_cmd(
     }
     let removed_rows = {
         let mut st = engine.state.lock().await;
-        st.gc_snapshots(&cutoff, keep_min).map_err(|e| e.to_string())?
+        st.gc_snapshots(&cutoff, keep_min)
+            .map_err(|e| e.to_string())?
     };
     let keep = {
         let st = engine.state.lock().await;

@@ -213,7 +213,11 @@ mod tests {
 
     #[test]
     fn is_ignored_matches_any_component() {
-        let pats = vec![".git".to_string(), "target".to_string(), "*.lock".to_string()];
+        let pats = vec![
+            ".git".to_string(),
+            "target".to_string(),
+            "*.lock".to_string(),
+        ];
         assert!(is_ignored(Path::new("target/debug/foo"), &pats));
         assert!(is_ignored(Path::new("a/b/Cargo.lock"), &pats));
         assert!(is_ignored(Path::new(".git/HEAD"), &pats));
