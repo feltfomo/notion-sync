@@ -14,6 +14,11 @@ All notable changes to this project are documented here. The format is based on
   recent un-checkpointed transactions -- and those are mapping/journal rows the next
   reconcile re-derives by rescanning, so the mirror self-heals. Also sets
   `temp_store=MEMORY` to keep SQLite's transient tables off disk.
+- **Under-the-hood performance pass.** Trimmed redundant allocations and passes across
+  the chunker/reassembler, the engine's UTF-8/binary classification (one decode instead
+  of two), the language-detection lookup, and smaller cleanups in the poller and conflict
+  paths. No behavior change: sync output stays byte-for-byte identical (the fidelity probe
+  still round-trips every byte).
 
 ### Fixed
 - **Notion -> local edits land promptly again.** The idle poll backoff was allowed to

@@ -97,13 +97,16 @@ prints which fields to edit, and exits.
 
 1. Create a Notion internal integration, copy its token, and **share the parent page with the
    integration** so it has write access.
-2. Export the token (it's never read from the config file):
+2. Make the token available. The daemon reads `$NOTION_TOKEN` first:
 
    ```sh
    set -x NOTION_TOKEN ntn_xxx     # fish
    export NOTION_TOKEN=ntn_xxx     # bash / zsh
    ```
 
+   Prefer to set it once instead of re-exporting it every session? Point `token_file` in your
+   config at a file that holds the token (see [Configuration](#configuration-configtoml)).
+   `$NOTION_TOKEN` takes priority; `token_file` is read only when the env var is unset or empty.
 3. Scaffold and edit the config:
 
    ```sh
@@ -159,8 +162,9 @@ is enabled.
 
 ## Configuration (`config.toml`)
 
-The token is **never** in this file. It comes from `$NOTION_TOKEN`. See `config.example.toml`
-for the annotated template.
+The token is **never** written inline in this file. It comes from `$NOTION_TOKEN`, or -- when
+that's unset or empty -- from the file named by `token_file`, so you can keep it set once
+instead of re-exporting it each session. See `config.example.toml` for the annotated template.
 
 ```toml
 notion_version     = "2022-06-28"
@@ -168,6 +172,9 @@ poll_interval_secs = 45
 debounce_ms        = 1000      # must be within [750, 2000]
 conflict_policy    = "local-wins"
 max_file_bytes     = 5000000
+
+# Optional. Read only when $NOTION_TOKEN is unset or empty (sops-nix / LoadCredential friendly).
+# token_file = "/run/secrets/notion-token"
 
 [mapping]
 local_root     = "/home/you/project"
