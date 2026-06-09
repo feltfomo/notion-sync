@@ -3,6 +3,7 @@
 //! (backup/restore/history/log/diff/show/untrash/gc).
 
 use std::collections::HashMap;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -12,26 +13,43 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use notion_sync::api::{NotionClient, RateLimiter};
-use notion_sync::cli::{Cli, Command};
+use notion_sync::cli::{resolve_ansi, Cli, ColorWhen, Command, LogTime};
 use notion_sync::config::Config;
 use notion_sync::state::State;
 use notion_sync::sync::{poller, reconcile, watcher, Engine};
 
 #[tokio::main]
 async fn main() {
-    // journald-friendly: no ANSI, structured fields. RUST_LOG overrides level.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .with_ansi(false)
-        .with_target(false)
-        .init();
-
+    // Parse before logging is up so --color / --log-time can shape the subscriber.
+    // clap handles --help/--version and bad args here (printing + exiting) itself.
     let cli = Cli::parse();
+    init_tracing(cli.color, cli.log_time);
+
     if let Err(e) = real_main(cli).await {
         error!(error = %e, "fatal");
         std::process::exit(1);
+    }
+}
+
+/// Install the global tracing subscriber. RUST_LOG still overrides the level filter.
+/// Logs go to stderr so subcommand stdout (e.g. `show`, `diff`) stays pipe-clean, and
+/// color auto-detects that same stderr so journald never gets escape codes.
+fn init_tracing(color: ColorWhen, log_time: LogTime) {
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .with_ansi(resolve_ansi(color, std::io::stderr().is_terminal()))
+        .with_target(false);
+    // Each arm finalizes its own builder: the timer methods change the builder's type,
+    // so they can't be reassigned into `builder` before calling init().
+    match log_time {
+        LogTime::Datetime => builder.init(),
+        LogTime::Uptime => builder
+            .with_timer(tracing_subscriber::fmt::time::uptime())
+            .init(),
+        LogTime::None => builder.without_time().init(),
     }
 }
 
@@ -43,6 +61,8 @@ async fn real_main(cli: Cli) -> Result<(), String> {
         // Read-only config inspector: no engine, no state.db, no Notion. Just load and
         // print so per-directory overrides can be eyeballed before trusting a sync.
         Some(Command::Config) => print_config(&config_path),
+        // Convenience wrapper over journalctl: no engine, no config, so handle it here.
+        Some(Command::Stream { lines, no_follow }) => stream_logs(lines, no_follow),
         Some(command) => {
             // The non-daemon subcommands need an engine (state + store + api) but not
             // the watcher/poller, and no whoami round-trip (only `untrash` calls out).
@@ -238,6 +258,43 @@ fn print_config(config_path: &Path) -> Result<(), String> {
         println!("    ignore         {:?}", m.ignore);
     }
     Ok(())
+}
+
+/// Follow the daemon's logs by handing off to journalctl for the systemd *user*
+/// service this ships as. On Unix we exec (replace this process) so Ctrl-C, follow,
+/// and paging behave exactly as if the user had run journalctl directly.
+fn stream_logs(lines: u32, no_follow: bool) -> Result<(), String> {
+    let mut cmd = std::process::Command::new("journalctl");
+    cmd.args([
+        "--user",
+        "--unit",
+        "notion-sync",
+        "--lines",
+        &lines.to_string(),
+    ]);
+    if !no_follow {
+        cmd.arg("--follow");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // exec only returns if it failed to replace this process.
+        Err(format!(
+            "could not run journalctl (is this a systemd/journald system?): {}",
+            cmd.exec()
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = cmd
+            .status()
+            .map_err(|e| format!("could not run journalctl: {e}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err("journalctl exited with a non-zero status".into())
+        }
+    }
 }
 
 #[cfg(unix)]

@@ -8,10 +8,17 @@
 
   outputs = { self, nixpkgs, flake-utils }:
     let
-      # System-independent outputs: the NixOS / home-manager-style module.
+      # System-independent outputs: the NixOS, home-manager, and hjem modules.
       moduleOutputs = {
         nixosModules.default = import ./nix/module.nix self;
         nixosModules.notion-sync = import ./nix/module.nix self;
+
+        homeManagerModules.default = import ./nix/home-manager.nix self;
+        homeManagerModules.notion-sync = import ./nix/home-manager.nix self;
+
+        # hjem manages files only, so this one needs no `self`/package.
+        hjemModules.default = import ./nix/hjem.nix;
+        hjemModules.notion-sync = import ./nix/hjem.nix;
       };
     in
     moduleOutputs // flake-utils.lib.eachDefaultSystem (system:

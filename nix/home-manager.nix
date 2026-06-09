@@ -1,8 +1,9 @@
-# systemd *user* service module for notion-sync (NixOS).
+# home-manager module for notion-sync.
 #
-# Usage:
+# Self-contained: defines the user service AND materializes config in the user's
+# home, so a home-manager-only user can deploy notion-sync entirely in Nix.
 #
-#   imports = [ inputs.notion-sync.nixosModules.default ];
+#   imports = [ inputs.notion-sync.homeManagerModules.default ];
 #   services.notion-sync = {
 #     enable = true;
 #     environmentFile = config.sops.secrets."notion-token".path; # 0600, NOTION_TOKEN=...
@@ -11,18 +12,8 @@
 #         parent_page_id = "0123...";
 #         ignore = [ ".git" "target" ]; }
 #     ];
+#     perDirectory."projects/app/vendor".ignore = [ "*.generated" ];
 #   };
-#
-# The service runs as a *user* service so inotify watches the user's files with
-# correct permissions and never needs root. The Notion token is supplied via
-# EnvironmentFile (a 0600 file OUTSIDE the world-readable nix store); for stronger
-# secret handling point it at an agenix/sops-nix decrypted runtime path.
-#
-# Config is rendered from `settings` into a store file and passed via `--config`.
-# That store file holds NO secrets (the token only ever comes from the env), so a
-# world-readable store path is fine. Set `configFile` instead to manage the TOML
-# yourself. Per-directory `.notion-sync.toml` files live in the user's home, so
-# they are handled by the home-manager / hjem modules, not here.
 
 self:
 { config, lib, pkgs, ... }:
@@ -35,11 +26,11 @@ let
     if cfg.configFile != null then
       toString cfg.configFile
     else
-      toString (helpers.renderConfig "notion-sync-config.toml" cfg.settings);
+      "${config.xdg.configHome}/notion-sync/config.toml";
 in
 {
   options.services.notion-sync = {
-    enable = lib.mkEnableOption "the notion-sync two-way sync daemon";
+    enable = lib.mkEnableOption "the notion-sync two-way sync daemon (home-manager)";
 
     package = lib.mkOption {
       type = lib.types.package;
@@ -50,6 +41,7 @@ in
 
     settings = helpers.settingsOption;
     configFile = helpers.configFileOption;
+    perDirectory = helpers.perDirectoryOption;
 
     environmentFile = lib.mkOption {
       type = lib.types.path;
@@ -68,34 +60,41 @@ in
       }
     ];
 
+    # Central config -> ~/.config/notion-sync/config.toml (unless the user brings
+    # their own configFile).
+    xdg.configFile = lib.mkIf (cfg.configFile == null) {
+      "notion-sync/config.toml".source =
+        helpers.renderConfig "notion-sync-config.toml" cfg.settings;
+    };
+
+    # Per-directory overrides, dropped into each mapped tree (paths relative to $HOME).
+    home.file = lib.mapAttrs'
+      (dir: value:
+        lib.nameValuePair "${dir}/.notion-sync.toml" {
+          source = helpers.renderConfig "notion-sync-perdir.toml" value;
+        })
+      cfg.perDirectory;
+
     systemd.user.services.notion-sync = {
-      description = "Two-way Notion <-> codebase sync daemon";
-      documentation = [ "https://github.com/feltfomo/notion-sync" ];
-      wantedBy = [ "default.target" ];
-      after = [ "network-online.target" ];
-      wants = [ "network-online.target" ];
-
-      environment.RUST_LOG = cfg.logLevel;
-
-      serviceConfig = {
+      Unit = {
+        Description = "Two-way Notion <-> codebase sync daemon";
+        Documentation = [ "https://github.com/feltfomo/notion-sync" ];
+        After = [ "network-online.target" ];
+        Wants = [ "network-online.target" ];
+      };
+      Install.WantedBy = [ "default.target" ];
+      Service = {
         Type = "simple";
         ExecStart = "${cfg.package}/bin/notion-sync ${helpers.execArgs configPath cfg}";
         # NOTION_TOKEN lives here, outside the nix store.
         EnvironmentFile = cfg.environmentFile;
+        Environment = [ "RUST_LOG=${cfg.logLevel}" ];
         Restart = "on-failure";
         RestartSec = 5;
-        # SIGTERM triggers graceful shutdown in the daemon; give it room to drain.
+        # SIGTERM triggers graceful shutdown; give it room to drain.
         KillSignal = "SIGTERM";
         TimeoutStopSec = 30;
-        # Light hardening (user service).
-        NoNewPrivileges = true;
-        ProtectKernelTunables = true;
-        ProtectControlGroups = true;
       };
     };
-
-    # Reminder for headless boxes: `loginctl enable-linger <user>` so the user
-    # service runs without an active login session. Not enforced here because it
-    # is a per-user/system policy decision.
   };
 }

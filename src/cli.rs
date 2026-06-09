@@ -10,11 +10,42 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use tracing::info;
 
 use crate::state::{rfc3339_minus_secs, SnapshotRow};
 use crate::sync::Engine;
+
+/// When to colorize log output. `Auto` enables color only when the log sink is a
+/// terminal, so a journald-captured service never receives ANSI escape codes.
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+pub enum ColorWhen {
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
+/// Timestamp style for log lines. `Datetime` is an RFC 3339 UTC stamp with seconds,
+/// `Uptime` is seconds since start, and `None` drops the stamp (handy under journald,
+/// which timestamps lines itself).
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+pub enum LogTime {
+    #[default]
+    Datetime,
+    Uptime,
+    None,
+}
+
+/// Decide whether to emit ANSI color from the `--color` choice plus whether the sink is
+/// a terminal. Split out from the IO so the policy itself is unit-testable.
+pub fn resolve_ansi(color: ColorWhen, is_terminal: bool) -> bool {
+    match color {
+        ColorWhen::Always => true,
+        ColorWhen::Never => false,
+        ColorWhen::Auto => is_terminal,
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -27,6 +58,14 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub config: Option<PathBuf>,
 
+    /// When to colorize log output: auto (default), always, or never.
+    #[arg(long, default_value = "auto", global = true)]
+    pub color: ColorWhen,
+
+    /// Log timestamp style: datetime (default), uptime, or none.
+    #[arg(long = "log-time", default_value = "datetime", global = true)]
+    pub log_time: LogTime,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -38,6 +77,17 @@ pub enum Command {
     /// Print the resolved config: every mapping's effective ignore list and size cap
     /// after per-directory .notion-sync.toml overrides merge in. Read-only, no Notion.
     Config,
+    /// Follow the daemon's logs. Thin wrapper over
+    /// `journalctl --user --unit notion-sync --follow` so the incantation isn't
+    /// something to memorize.
+    Stream {
+        /// How many past lines to show before following.
+        #[arg(short = 'n', long, default_value_t = 50)]
+        lines: u32,
+        /// Print recent logs and exit instead of following.
+        #[arg(long)]
+        no_follow: bool,
+    },
     /// Print the sync journal: the audit trail of every push/pull/delete.
     Log {
         /// Restrict to a single repo-relative path.
@@ -118,6 +168,9 @@ pub async fn dispatch(engine: Arc<Engine>, command: Command) -> Result<(), Strin
         Command::Run => Err("internal: `run` is handled by the daemon entrypoint".into()),
         Command::Config => {
             Err("internal: `config` is handled in main before the engine is built".into())
+        }
+        Command::Stream { .. } => {
+            Err("internal: `stream` is handled in main before the engine is built".into())
         }
         Command::Log { path, limit } => log_cmd(&engine, path.as_deref(), limit).await,
         Command::History { path, limit } => history_cmd(&engine, &path, limit).await,
@@ -513,5 +566,16 @@ mod tests {
         assert_eq!(short(&Some("0123456789".to_string())), "01234567");
         assert_eq!(short(&Some("abc".to_string())), "abc");
         assert_eq!(short(&None), "-");
+    }
+
+    #[test]
+    fn color_policy_forces_then_falls_back_to_tty() {
+        // always / never ignore the terminal; auto follows it.
+        assert!(resolve_ansi(ColorWhen::Always, false));
+        assert!(resolve_ansi(ColorWhen::Always, true));
+        assert!(!resolve_ansi(ColorWhen::Never, true));
+        assert!(!resolve_ansi(ColorWhen::Never, false));
+        assert!(resolve_ansi(ColorWhen::Auto, true));
+        assert!(!resolve_ansi(ColorWhen::Auto, false));
     }
 }

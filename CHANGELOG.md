@@ -4,6 +4,34 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-06-09
+
+### Added
+- **Declarative Nix config.** The NixOS module gained a `settings` option that renders
+  `config.toml` straight from Nix via `pkgs.formats.toml`, so you no longer hand-place the
+  file and point `configFile` at it. `configFile` is now optional and acts as an escape
+  hatch; set one or the other. The token still only comes from `environmentFile`, never the
+  rendered (world-readable) store path.
+- **home-manager module.** `homeManagerModules.default` runs the daemon as a systemd user
+  service and materializes config in `$HOME`, so a home-manager-only user can deploy
+  notion-sync entirely in Nix, `perDirectory` overrides included.
+- **hjem module.** `hjemModules.default` renders the central `config.toml` and per-tree
+  `.notion-sync.toml` files for hjem users. Config-only on purpose: hjem doesn't define
+  services (feel-co/hjem#63), so the daemon still comes from the NixOS or home-manager
+  module.
+- **`ns stream`.** Wraps `journalctl --user --unit notion-sync --follow` so you don't have
+  to remember it. `-n/--lines` sets the backlog (default 50), `--no-follow` prints and exits.
+- **Log presentation flags.** `--color auto|always|never` (auto colors only on a TTY) and
+  `--log-time datetime|uptime|none` (datetime carries seconds). Both are exposed as Nix
+  module options.
+
+### Changed
+- **Logs go to stderr.** Diagnostics no longer mix into stdout, so piped command output
+  stays clean.
+- **Slimmed the sync internals.** Trimmed dead paths and tightened the engine/poller/
+  reconcile ahead of the webhook work, with no behavior change -- the fidelity probe still
+  round-trips every byte and the suite stays green.
+
 ## [0.3.0] - 2026-06-09
 
 ### Added
@@ -133,6 +161,7 @@ All notable changes to this project are documented here. The format is based on
 - Initial one-way mirror (local -> Notion) with watcher, poller, reconcile, local-wins
   conflict handling, and the chunk fidelity probe.
 
+[0.4.0]: https://github.com/feltfomo/notion-sync/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/feltfomo/notion-sync/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/feltfomo/notion-sync/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/feltfomo/notion-sync/compare/v0.1.0...v0.2.0
