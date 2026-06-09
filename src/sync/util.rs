@@ -11,10 +11,9 @@ pub enum TextOrBinary {
 
 /// Sniff and decode in a single pass. v1 mirrors text (UTF-8) only, so a file is binary
 /// if it has a NUL byte in the first 8 KiB OR is not valid UTF-8. The NUL check runs
-/// first and short-circuits, preserving the old precedence (a NUL wins before any UTF-8
-/// scan). On the text path the UTF-8 validation that proves it is text also yields the
-/// String, so callers no longer validate UTF-8 a second time with from_utf8; on the
-/// binary path the bytes are returned intact (no copy) for the placeholder.
+/// first and short-circuits (a NUL wins before any UTF-8 scan). On the text path the
+/// UTF-8 validation also yields the String; on the binary path the bytes are returned
+/// intact for the placeholder.
 pub fn classify_text(bytes: Vec<u8>) -> TextOrBinary {
     let head = &bytes[..bytes.len().min(8192)];
     if head.contains(&0) {
@@ -134,8 +133,7 @@ pub async fn walk_async(root: PathBuf, ignore: Vec<String>) -> std::io::Result<V
         .map_err(std::io::Error::other)?
 }
 
-/// File mtime in nanoseconds since the Unix epoch (a cheap local-change hint). Single
-/// home for what used to be copy-pasted into engine.rs and conflict.rs.
+/// File mtime in nanoseconds since the Unix epoch (a cheap local-change hint).
 pub fn file_mtime_ns(path: &Path) -> Option<i64> {
     let meta = std::fs::metadata(path).ok()?;
     let mtime = meta.modified().ok()?;

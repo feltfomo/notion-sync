@@ -56,9 +56,8 @@ pub async fn resolve_pull(engine: &Engine, node: &Node) -> anyhow_lite::Result {
                 local_bytes,
             )
             .await;
-        // Record this as our own write BEFORE touching disk so the local watcher can
-        // recognize the resulting filesystem event as an echo and skip it, instead of
-        // re-pushing the just-pulled content straight back to Notion.
+        // Record this as our own write BEFORE touching disk so the watcher recognizes
+        // the resulting filesystem event as an echo and skips it.
         engine.note_self_write(&node.rel_path, &notion_hash).await;
         // Clean fast-forward from Notion -> disk (async atomic write).
         util::atomic_write(&abs, notion_content.into_bytes())
@@ -110,8 +109,8 @@ pub async fn resolve_pull(engine: &Engine, node: &Node) -> anyhow_lite::Result {
         )
         .await;
     // Re-push local to restore the mirror. Use force_push_locked, not sync_file: we
-    // already hold this path's lock via pull_page, so sync_file would re-lock the same
-    // mutex and deadlock; a full rebuild also clears any stray blocks.
+    // already hold this path's lock via pull_page, so sync_file would deadlock
+    // re-locking the same mutex; a full rebuild also clears any stray blocks.
     engine.force_push_locked(&node.rel_path).await
 }
 

@@ -9,15 +9,13 @@ pub const MAX_ITEMS_PER_BLOCK: usize = 100;
 pub const MAX_CHILDREN_PER_REQUEST: usize = 100;
 
 pub struct EncodedBlock {
-    // &'static because language::for_path returns a static table entry; the only owned
-    // String it ever needs is the one serde hands to CodeReq at serialize time.
+    // &'static: language::for_path returns a static table entry.
     pub language: &'static str,
     pub segments: Vec<String>,
 }
 
 impl EncodedBlock {
-    // Consuming: the body is sent to Notion exactly once, so move the segments into the
-    // request instead of cloning the whole file a second time on the push path.
+    // Consumes self: the body is sent once, so move segments instead of cloning.
     pub fn into_json(self) -> serde_json::Value {
         let rich: Vec<RichTextReq> = self.segments.into_iter().map(RichTextReq::text).collect();
         let block = CodeBlockReq::new(self.language.to_string(), rich);
@@ -34,8 +32,7 @@ pub fn encode(content: &str, language: &'static str) -> Vec<EncodedBlock> {
         segments
     };
 
-    // Group segments into blocks of at most MAX_ITEMS_PER_BLOCK by moving them in;
-    // chunks().to_vec() would clone every segment a second time.
+    // Move segments in rather than chunks().to_vec(), which would clone each one.
     let mut blocks = Vec::new();
     let mut current = Vec::with_capacity(MAX_ITEMS_PER_BLOCK);
     for seg in segments {
@@ -56,8 +53,7 @@ pub fn encode(content: &str, language: &'static str) -> Vec<EncodedBlock> {
     blocks
 }
 
-// Takes the blocks by value: the sole caller drops them right after batching, so moving
-// each into its JSON request avoids cloning the segments yet again.
+// By value: the caller drops these right after, so move into JSON instead of cloning.
 pub fn batch_blocks(blocks: Vec<EncodedBlock>) -> Vec<Vec<serde_json::Value>> {
     let mut batches = Vec::new();
     let mut current = Vec::with_capacity(MAX_CHILDREN_PER_REQUEST);
@@ -83,9 +79,8 @@ pub fn reassemble(blocks_plain_text: &[Vec<String>]) -> String {
     out
 }
 
-// Notion counts content length in UTF-16 units (JS semantics), not scalars, so a
-// non-BMP char costs 2. Flush before overflowing the budget and never split a scalar,
-// or surrogate pairs break and write-back corrupts. The fidelity probe exists to catch this.
+// Notion counts length in UTF-16 units, not scalars, so a non-BMP char costs 2. Flush
+// before overflowing and never split a scalar, or write-back corrupts.
 fn split_into_segments(content: &str) -> Vec<String> {
     let mut segments = Vec::new();
     let mut current = String::new();
@@ -163,9 +158,8 @@ mod tests {
 
     #[test]
     fn empty_file_emits_one_block_through_batching() {
-        // The move-based encode/batch rewrite must preserve the invariant: an empty file
-        // still yields exactly one block carrying a single empty segment, so every page
-        // keeps a body block to diff against.
+        // An empty file still yields one block with a single empty segment, so every
+        // page keeps a body block to diff against.
         let blocks = encode("", "rust");
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].segments, vec![String::new()]);

@@ -236,10 +236,10 @@ impl NotionClient {
     }
 
     /// POST /v1/search: page ids + last-edit timestamps, newest first, fully
-    /// paginated. The poller uses this as a cheap prefilter so it can skip unchanged
-    /// nodes without a GET /v1/pages per tracked file (#8). Pagination is capped so a
-    /// huge workspace can't turn one poll cycle into an unbounded scan; nodes beyond
-    /// the cap simply fall back to an individual fetch.
+    /// paginated. The poller uses this as a cheap prefilter to skip unchanged nodes
+    /// without a GET /v1/pages per tracked file. Pagination is capped so a huge
+    /// workspace can't turn one poll cycle into an unbounded scan; nodes beyond the cap
+    /// fall back to an individual fetch.
     pub async fn search_pages_by_last_edited(&self) -> Result<Vec<(String, String)>, ApiError> {
         const MAX_PAGES: u32 = 10; // up to ~1000 most-recently-edited pages
         let mut out = Vec::new();

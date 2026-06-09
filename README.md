@@ -1,44 +1,28 @@
 # notion-sync
 
-A background daemon that keeps one or more local directories and their Notion page trees in two-way sync.
-The local filesystem is the source of truth (local-wins): Notion is a mirror you can read,
-comment on, and lightly edit from anywhere. On a conflict, the file on disk wins.
+A background daemon that keeps local directories and their Notion page trees in two-way sync. The filesystem is the source of truth: Notion is a mirror you can read, comment on, and lightly edit. On a conflict, the local file wins.
 
-Mirrors any UTF-8 text file, not just code. Markdown, config, prose, whatever. Each file's
-bytes are wrapped in Notion code blocks so they round-trip exactly.
+Works on any UTF-8 text file, not just code. Each file's bytes are wrapped in Notion code blocks so they round-trip exactly.
 
 ## Install
 
-No system dependencies to chase down: TLS is rustls (no OpenSSL) and SQLite is bundled, so a
-single binary is all you need. Start with Option A. The rest are here if you'd rather not pipe
-a script into a shell, or want to build it yourself.
+TLS is rustls (no OpenSSL) and SQLite is bundled, so the binary is self-contained. Setup still requires a Notion integration token and a small config file (see [Quickstart](#quickstart)).
 
-Downloading is the easy part. This is a developer tool, so finishing setup still means creating
-a Notion integration token and editing a small config file (see [Quickstart](#quickstart)).
-
-### Option A: one-line installer (easiest)
-
-Paste this into a terminal:
+### Option A: install script
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/feltfomo/notion-sync/main/scripts/install.sh | sh
 ```
 
-It picks the right build, downloads `notion-sync` and `fidelity-probe`, verifies them, and
-installs to `~/.local/bin`. If that folder isn't on your `PATH`, it prints the one line to fix
-that.
+Picks the right build, downloads `notion-sync` and `fidelity-probe`, verifies them, and installs to `~/.local/bin`. Source: <https://github.com/feltfomo/notion-sync/blob/main/scripts/install.sh>
 
-Want to read it before piping it into a shell? Fair:
-<https://github.com/feltfomo/notion-sync/blob/main/scripts/install.sh>
-
-### Option B: download by hand (no script)
+### Option B: manual download
 
 1. Open the latest release: <https://github.com/feltfomo/notion-sync/releases/latest>
-2. Under **Assets**, grab these two (the `musl` builds are static and run on any Linux; pick
-   these when in doubt):
+2. Under **Assets**, download the `musl` builds (static, run on any Linux):
    - `notion-sync-x86_64-unknown-linux-musl`
    - `fidelity-probe-x86_64-unknown-linux-musl`
-3. Make them runnable and put them on your `PATH`:
+3. Install them:
 
    ```sh
    mkdir -p ~/.local/bin
@@ -47,19 +31,15 @@ Want to read it before piping it into a shell? Fair:
    chmod +x ~/.local/bin/notion-sync ~/.local/bin/fidelity-probe
    ```
 
-4. If `~/.local/bin` isn't on your `PATH`, add it (bash shown):
+4. Add `~/.local/bin` to your `PATH` if needed:
 
    ```sh
    echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
    ```
 
-On an unusual setup, the `-gnu` files are the smaller glibc build and are otherwise identical.
-To check nothing got mangled in transit, download `SHA256SUMS` into the same folder and run
-`sha256sum --check --ignore-missing SHA256SUMS`.
+The `-gnu` builds are smaller glibc binaries and otherwise identical. To verify downloads, fetch `SHA256SUMS` into the same folder and run `sha256sum --check --ignore-missing SHA256SUMS`.
 
-### Option C: build it yourself
-
-With cargo (needs Rust >= 1.74):
+### Option C: build from source
 
 ```sh
 cargo install --git https://github.com/feltfomo/notion-sync --tag v0.3.0
@@ -71,52 +51,45 @@ From a checkout:
 git clone https://github.com/feltfomo/notion-sync
 cd notion-sync
 cargo build --release
-# binaries land in ./target/release/{notion-sync,fidelity-probe}
+# binaries in ./target/release/{notion-sync,fidelity-probe}
 ```
 
-For a static musl binary, build with [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild)
-(it handles the bundled SQLite cross-compile):
+For a static musl binary, use [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild):
 
 ```sh
 rustup target add x86_64-unknown-linux-musl
 cargo zigbuild --release --target x86_64-unknown-linux-musl
 ```
 
-Or run it once without installing:
+Run without installing:
 
 ```sh
 nix run github:feltfomo/notion-sync
 ```
 
-On NixOS, don't `nix profile install` it. Use the flake input and module below.
+On NixOS, use the flake input and module below rather than `nix profile install`.
 
 ## Quickstart
 
-On first run with no config, the daemon writes a starter `~/.config/notion-sync/config.toml`,
-prints which fields to edit, and exits.
+On first run with no config, the daemon writes a starter `~/.config/notion-sync/config.toml`, prints the fields to edit, and exits.
 
-1. Create a Notion internal integration, copy its token, and **share the parent page with the
-   integration** so it has write access.
-2. Make the token available. The daemon reads `$NOTION_TOKEN` first:
+1. Create a Notion internal integration, copy its token, and share the parent page with the integration so it has write access.
+2. Export the token:
 
    ```sh
-   set -x NOTION_TOKEN ntn_xxx     # fish
    export NOTION_TOKEN=ntn_xxx     # bash / zsh
+   set -x NOTION_TOKEN ntn_xxx     # fish
    ```
 
-   Prefer to set it once instead of re-exporting it every session? Point `token_file` in your
-   config at a file that holds the token (see [Configuration](#configuration-configtoml)).
-   `$NOTION_TOKEN` takes priority; `token_file` is read only when the env var is unset or empty.
-3. Scaffold and edit the config:
+   Or point `token_file` in the config at a file holding the token. `$NOTION_TOKEN` takes priority; `token_file` is read only when it's unset or empty.
+3. Edit the config:
 
    ```sh
    notion-sync                                   # writes config.toml, then exits
    $EDITOR ~/.config/notion-sync/config.toml     # set local_root + parent_page_id
-                                                 # (add more [[mapping]] blocks to mirror more dirs)
    ```
 
-4. **Run the fidelity gate first** (see below) against a scratch page.
-5. Start the daemon:
+4. Start the daemon:
 
    ```sh
    notion-sync --config ~/.config/notion-sync/config.toml
@@ -131,46 +104,28 @@ Notion page edited ──(poll every 45s)──────▶  poller ─▶ co
             state.db (SQLite, machine-local) tracks the file ⇄ page mapping
 ```
 
-- **Folders** become subpages. **Files** become subpages whose body is the file content
-  wrapped in syntax-highlighted code blocks.
-- File contents are **chunked** to respect Notion limits: 2000 UTF-16 units per rich-text item
-  (the count Notion enforces, not Rust `char`s), 100 items per code block, 100 children per
-  append. Chunking is positional, so reassembly is byte-exact.
-- **Page title = filename.** Renames are detected by content hash and applied with
-  `PATCH /v1/pages/{id}`, so a page keeps its comments and history across a `git mv` instead of
-  being trashed and recreated.
-- **Binary or oversized files** get a placeholder page with a warning callout and are never
-  written back.
-- **Symlinks are skipped, never followed.** A symlink (like a `nix build` `result`) is left out
-  of the mirror entirely, so build output and external link targets don't leak into Notion.
-- A shared token-bucket rate limiter (~3 req/s) covers the watcher and poller. 429s honor
-  `Retry-After`; 409/5xx use exponential backoff with jitter.
-- Startup **reconciliation** adopts existing pages by title rather than recreating them, and
-  skips any mapping whose local tree is missing or empty so a transient glitch can't wipe that
-  mapping's mirror (the other mappings keep syncing).
-- **Multiple directories.** Add a `[[mapping]]` block per directory; each has its own
-  `local_root`, `parent_page_id`, and `ignore` list, and one daemon syncs them all.
+- Folders become subpages. Files become subpages whose body is the file content in syntax-highlighted code blocks.
+- File contents are chunked to respect Notion limits (2000 UTF-16 units per rich-text item, 100 items per code block, 100 children per append). Chunking is positional, so reassembly is byte-exact.
+- Page title is the filename. Renames are detected by content hash and applied with `PATCH /v1/pages/{id}`, so a page keeps its comments and history across a `git mv`.
+- Binary or oversized files get a placeholder page and are never written back.
+- Symlinks are skipped, never followed.
+- A shared token-bucket rate limiter (~3 req/s) covers the watcher and poller. 429s honor `Retry-After`; 409/5xx use exponential backoff with jitter.
+- Startup reconciliation adopts existing pages by title, and skips any mapping whose local tree is missing or empty so a transient glitch can't wipe its mirror.
+- Add a `[[mapping]]` block per directory to mirror multiple trees from one daemon.
 
-## Fidelity gate (run this first)
+## Fidelity check (optional)
 
-Write-back is only safe if Notion preserves bytes exactly. Before trusting the daemon, run the
-probe against a real workspace:
+Write-back is only safe if Notion preserves bytes exactly. `fidelity-probe` writes an adversarial payload (tabs, trailing whitespace, emoji/CJK, a >2000-char multibyte run, a final newline) through the real API, reads it back through the chunker, and exits non-zero if any byte differs:
 
 ```sh
-NOTION_TOKEN=ntn_xxx cargo run --bin fidelity-probe -- --parent-page-id <PAGE_ID>
+NOTION_TOKEN=ntn_xxx fidelity-probe --parent-page-id <PAGE_ID>
 ```
 
-It writes an adversarial payload (tabs, mixed indentation, trailing whitespace, a blank line,
-emoji/CJK/€/é, a >2000-char multibyte run, a final newline) through the real `/v1/blocks` API,
-reads it back through the same chunker, and **exits non-zero if a single byte differs**. If
-Notion ever mutates content, the chunker has to compensate deterministically before write-back
-is enabled.
+Run it against a scratch page before trusting the daemon on important files.
 
 ## Configuration (`config.toml`)
 
-The token is **never** written inline in this file. It comes from `$NOTION_TOKEN`, or -- when
-that's unset or empty -- from the file named by `token_file`, so you can keep it set once
-instead of re-exporting it each session. See `config.example.toml` for the annotated template.
+The token is never written in this file; it comes from `$NOTION_TOKEN` or the file named by `token_file`. See `config.example.toml` for the annotated template.
 
 ```toml
 notion_version     = "2022-06-28"
@@ -179,12 +134,9 @@ debounce_ms        = 1000      # must be within [750, 2000]
 conflict_policy    = "local-wins"
 max_file_bytes     = 5000000
 
-# Optional. Read only when $NOTION_TOKEN is unset or empty (sops-nix / LoadCredential friendly).
+# Read only when $NOTION_TOKEN is unset or empty.
 # token_file = "/run/secrets/notion-token"
 
-# Repeat [[mapping]] once per directory. An optional `name` (default: the last component
-# of local_root) labels the mapping's subtree in state.db and must be unique. A single
-# legacy `[mapping]` table is still accepted.
 [[mapping]]
 name           = "project"
 local_root     = "/home/you/project"
@@ -198,34 +150,23 @@ parent_page_id = "fedcba9876543210fedcba9876543210"
 ignore         = [".git", ".notion-sync"]
 ```
 
-### Per-directory overrides (optional)
+`name` is optional (defaults to the last component of `local_root`) and must be unique. A single `[mapping]` table is also accepted.
 
-The central config is the registry: it's where a mapping's `local_root`, `parent_page_id`, and
-the daemon-wide knobs live, and it can't go away (something has to know which directories exist
-before it can read anything inside them). But per-directory settings like `ignore` don't belong
-in one central list once you're mirroring several trees, so each mapped directory can carry its
-own `.notion-sync.toml` in its root:
+### Per-directory overrides
+
+Each mapped directory can carry a `.notion-sync.toml` in its root:
 
 ```toml
 # /home/you/project/.notion-sync.toml
-ignore         = ["build", "*.tmp"]   # ADDED to the central ignore list, not replacing it
-max_file_bytes = 20000000             # overrides the central cap, this directory only
+ignore         = ["build", "*.tmp"]   # added to the central ignore list
+max_file_bytes = 20000000             # overrides the central cap for this directory
 ```
 
-The file is optional (a directory with none behaves exactly as before), travels with the
-directory so you can commit it to that repo, and honors only those two keys. Anything else
-(`parent_page_id`, `local_root`, `token_file`, ...) is rejected at load, so a mapping can't be
-repointed or have its token swapped from inside its own tree. `ignore` is additive on top of the
-central baseline; `max_file_bytes` is a straight override.
+It honors only those two keys; anything else (`parent_page_id`, `local_root`, `token_file`) is rejected, so a mapping can't be repointed from inside its own tree. `.notion-sync.toml` and the `.notion-sync/` state dir are never mirrored.
 
-The daemon never mirrors `.notion-sync.toml` or the `.notion-sync/` state dir, whatever your
-`ignore` says.
+## NixOS
 
-## NixOS (flake input + systemd service)
-
-Add it as a flake input and use the bundled module. `flake.nix` exposes a `buildRustPackage`
-package, a `nix run` app, and `nixosModules.default`. The token comes from `EnvironmentFile=`
-(a `0600` secrets file, or agenix/sops-nix) and never touches the Nix store.
+`flake.nix` exposes a package, a `nix run` app, and `nixosModules.default`. The token comes from `EnvironmentFile=` and never touches the Nix store.
 
 ```nix
 {
@@ -257,64 +198,24 @@ Then `nixos-rebuild switch`. Update with `nix flake update notion-sync`.
 
 Options under `services.notion-sync`:
 
-| Option | Type | Default | What it does |
+| Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `enable` | bool | `false` | Turn the user service on. |
-| `package` | package | the flake's `notion-sync` | The build to run; override to pin or patch. |
-| `configFile` | path | _required_ | Absolute path to your `config.toml`, passed as `--config`. |
-| `environmentFile` | path | _required_ | `0600` file holding `NOTION_TOKEN=...`, loaded by systemd at start. |
-| `logLevel` | string | `"info"` | `RUST_LOG` for the unit: `error`, `warn`, `info`, `debug`, or `trace`. |
+| `package` | package | the flake's `notion-sync` | The build to run. |
+| `configFile` | path | _required_ | Path to `config.toml`, passed as `--config`. |
+| `environmentFile` | path | _required_ | `0600` file holding `NOTION_TOKEN=...`. |
+| `logLevel` | string | `"info"` | `RUST_LOG` level: `error`, `warn`, `info`, `debug`, `trace`. |
 
-It runs as a **user service**, restarts on failure, and stops cleanly on SIGTERM. On a headless
-box it needs lingering to run without an active login: set `users.users.<name>.linger = true;`,
-or run `loginctl enable-linger <user>`.
+It runs as a user service and restarts on failure. On a headless box, enable lingering: `users.users.<name>.linger = true;` or `loginctl enable-linger <user>`.
 
 ## State & limitations
 
-- `state.db` lives under `$XDG_STATE_HOME/notion-sync/` (falls back to
-  `~/.local/state/notion-sync/`). The shared content-addressed snapshot store sits beside
-  it at `$XDG_STATE_HOME/notion-sync/objects/`, so dedup spans every mapping.
-- With multiple mappings, every node/snapshot/journal path is namespaced as
-  `<mapping>/<path>` (the mapping's `name`, defaulting to its `local_root`'s last
-  component). CLI subcommands (`log`, `show`, `restore`, ...) take these `<mapping>/<path>`
-  keys. A `state.db` from before 0.3 is migrated automatically on first start **only** when
-  a single mapping is configured; with several mappings already listed the daemon asks you
-  to run once with the original single mapping first.
-- Conflict backups go to the owning mapping's `<local_root>/.notion-sync/conflicts/`.
-- **Per-directory config.** Each mapped directory can carry a `.notion-sync.toml` in its root
-  that extends its `ignore` (additive) and overrides `max_file_bytes`. It's never mirrored,
-  and neither is the `.notion-sync/` state dir. See
-  [Per-directory overrides](#per-directory-overrides-optional).
-- **Symlinks aren't followed.** A symlink (a `nix build` `result`, say) is skipped, not
-  mirrored, so build output and external link targets stay out of Notion.
-- **Markdown caveat:** edit `.md` files locally, not in Notion's block editor. A file's bytes
-  live inside one code block, so a structured edit of a Markdown file (with its own code fences)
-  can split the mirror. The daemon detects this and force-pushes local instead, but treat `.md`
-  mirror pages as read-only and save yourself the trouble.
-- **Multi-machine is out of scope for v1.** `state.db` is deliberately local. Don't run two
-  daemons against the same Notion tree from different machines.
-- Trashed-block cleanup isn't implemented. Notion auto-purges trash after 30 days anyway.
-
-## Layout
-
-```text
-src/
-  api/        rate-limited retrying client + serde models + shared token bucket
-  chunk.rs    positional chunker/reassembler (fidelity-critical)
-  language.rs extension -> Notion code-block language
-  hashutil.rs blake3 hashing (change + rename detection)
-  config.rs   TOML loader + ignore globs + per-directory overrides
-  state.rs    SQLite state.db
-  sync/       engine, watcher, poller, conflict, reconcile, locks, util
-  lib.rs      crate root that wires the modules together
-  main.rs     daemon entrypoint (reconcile -> watcher + poller, SIGTERM)
-  bin/fidelity_probe.rs   the standalone fidelity gate
-nix/module.nix  NixOS user-service module
-flake.nix       package + run app + NixOS module outputs
-```
-
-Unit tests live inline as `#[cfg(test)]` modules (see `chunk.rs`, `state.rs`). The fidelity
-probe is the live, credential-gated check, not a `cargo test` target.
+- `state.db` lives under `$XDG_STATE_HOME/notion-sync/` (falls back to `~/.local/state/notion-sync/`). The content-addressed snapshot store sits beside it at `objects/`, so dedup spans every mapping.
+- With multiple mappings, every path is namespaced as `<mapping>/<path>`. CLI subcommands (`log`, `show`, `restore`, ...) take these keys. A pre-0.3 `state.db` migrates automatically only when a single mapping is configured.
+- Conflict backups go to `<local_root>/.notion-sync/conflicts/`.
+- Edit `.md` files locally, not in Notion's block editor. A file's bytes live in one code block, so a structured edit can split the mirror; the daemon detects this and force-pushes local, but treat `.md` mirror pages as read-only.
+- `state.db` is local by design. Don't run two daemons against the same Notion tree from different machines.
+- Trashed-block cleanup isn't implemented; Notion auto-purges trash after 30 days.
 
 ## License
 

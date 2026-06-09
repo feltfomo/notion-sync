@@ -64,14 +64,11 @@ impl State {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        // WAL already fsyncs the log on every commit; synchronous=NORMAL drops the extra
-        // full-database fsync per commit and syncs at checkpoint instead. In WAL mode this
-        // is still crash-safe: the DB is never corrupted, and an application crash (panic,
-        // kill, SIGTERM) loses nothing. The only exposure is that a power loss or OS-level
-        // crash can roll back the last un-checkpointed transactions -- and those are just
-        // mapping/journal rows the next reconcile re-derives by rescanning, so the mirror
-        // self-heals rather than breaking. temp_store=MEMORY keeps SQLite's transient
-        // tables and indices (the state DB is tiny) in RAM off the disk entirely.
+        // synchronous=NORMAL is crash-safe under WAL: the DB is never corrupted, and an
+        // application crash loses nothing. Only a power loss or OS crash can roll back the
+        // last un-checkpointed transactions -- mapping/journal rows the next reconcile
+        // re-derives by rescanning, so the mirror self-heals. temp_store=MEMORY keeps the
+        // (tiny) transient tables in RAM.
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "temp_store", "MEMORY")?;
         let s = State { conn };
@@ -89,9 +86,8 @@ impl State {
 
     /// Versioned migration runner. Each step is applied in order based on
     /// `PRAGMA user_version`, so future column/table additions stay possible on an
-    /// already-populated DB instead of relying on bare CREATE TABLE IF NOT EXISTS
-    /// (which can never ALTER). An existing v0.1 DB has user_version 0 and a `nodes`
-    /// table; step 1's CREATE ... IF NOT EXISTS is then a harmless no-op.
+    /// already-populated DB. An existing v0.1 DB has user_version 0 and a `nodes` table;
+    /// step 1's CREATE ... IF NOT EXISTS is then a no-op.
     fn migrate(&self) -> rusqlite::Result<()> {
         let version: i64 = self
             .conn
@@ -155,11 +151,10 @@ impl State {
         if version < 3 {
             // v3: a tiny key/value table plus a one-time flag for the path-namespacing
             // migration. Multi-directory support keys every node as `<mapping>/<rel>`,
-            // but a DB created before that has bare paths. We can't re-key here (the
-            // mapping name lives in config, not in this layer), so we only RECORD whether
-            // a migration is owed; the daemon performs it once it has the config. A DB
-            // that already has rows predates namespacing ('0' => owed); a fresh DB is
-            // namespaced by construction ('1').
+            // but a pre-multi-directory DB has bare paths. We can't re-key here (the
+            // mapping name lives in config), so only RECORD whether a migration is owed;
+            // the daemon performs it once it has the config. A DB with rows predates
+            // namespacing ('0' => owed); a fresh DB is namespaced by construction ('1').
             self.conn.execute_batch(
                 r#"
                 CREATE TABLE IF NOT EXISTS meta (
@@ -638,9 +633,8 @@ mod tests {
 
     #[test]
     fn tracked_files_excludes_dirs_and_binary_placeholders() {
-        // poll_once iterates tracked_files() and no longer filters in the loop, so this
-        // SQL predicate is the only thing keeping dirs and binary placeholders out of
-        // the poll. Lock it down.
+        // tracked_files()'s SQL predicate is the only thing keeping dirs and binary
+        // placeholders out of the poll, so lock it down.
         let st = State::open_in_memory().unwrap();
         st.upsert(&sample("src/main.rs", "h1")).unwrap();
         let mut dir = sample("src", "h2");
@@ -751,10 +745,8 @@ mod tests {
 
     #[test]
     fn open_sets_wal_and_durability_pragmas() {
-        // open() (the on-disk path) must keep WAL and pin synchronous=NORMAL (1) and
-        // temp_store=MEMORY (2). NORMAL is only crash-safe under WAL, so this guards
-        // against journal_mode silently regressing out from under it. open_in_memory()
-        // is a separate, diskless path and intentionally not covered here.
+        // open() must keep WAL and pin synchronous=NORMAL (1) and temp_store=MEMORY (2).
+        // NORMAL is only crash-safe under WAL, so guard against journal_mode regressing.
         let path =
             std::env::temp_dir().join(format!("notion-sync-pragma-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);

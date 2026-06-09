@@ -49,9 +49,8 @@ fn lang_for_ext(ext: &str) -> Option<&'static str> {
 
 pub fn for_path(path: &Path) -> &'static str {
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        // Extensions are almost always already lowercase, so match the borrowed &str
-        // first and skip the per-call to_ascii_lowercase allocation. Only an extension
-        // that actually carries uppercase bytes (.RS, .Py) pays for the lowercase retry.
+        // Extensions are almost always lowercase, so match the borrowed &str first and
+        // skip the to_ascii_lowercase allocation; only uppercase extensions pay the retry.
         if let Some(lang) = lang_for_ext(ext) {
             return lang;
         }
@@ -89,7 +88,7 @@ mod tests {
     #[test]
     fn extension_match_is_case_insensitive() {
         // Raw-first matching must still fall back to a lowercase retry for uppercase
-        // extensions, exactly as the old always-lowercase path did.
+        // extensions.
         assert_eq!(lang("README.RS"), "rust");
         assert_eq!(lang("Main.Py"), "python");
         assert_eq!(lang("INDEX.HTML"), "html");

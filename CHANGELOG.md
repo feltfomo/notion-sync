@@ -44,6 +44,7 @@ All notable changes to this project are documented here. The format is based on
 - **`.notion-sync.toml` and the `.notion-sync/` state dir are always ignored**, regardless
   of the configured `ignore` list, so a config edit can't drag the daemon's own machinery
   into Notion.
+  
 
 ### Migration
 - A pre-0.3 `state.db` is migrated **automatically on first start, but only when exactly

@@ -21,9 +21,8 @@ pub struct RawConfig {
     /// unset/empty (sops / systemd LoadCredential friendly).
     #[serde(default)]
     pub token_file: Option<PathBuf>,
-    /// One or many mappings. TOML accepts either a single `[mapping]` table (the
-    /// legacy single-directory form) or repeated `[[mapping]]` tables (one per
-    /// directory). Untagged, so a sequence-vs-table shape disambiguates the two.
+    /// One or many mappings. TOML accepts either a single `[mapping]` table or repeated
+    /// `[[mapping]]` tables; untagged, so the table-vs-sequence shape picks the variant.
     pub mapping: RawMappings,
 }
 

@@ -100,12 +100,11 @@ pub async fn run(engine: Arc<Engine>) -> Result<(), String> {
         .filter(|n| healthy.contains(n.rel_path.split('/').next().unwrap_or("")))
         .collect();
 
-    // Mass-delete guard (#3): a large-but-partial disappearance (an interrupted
-    // checkout, a case-fold rename, a botched rebase) shouldn't silently trash a big
-    // slice of the mirror. The whole-tree case is already caught above; here, once
-    // missing files exceed ~20% of a non-trivial tree, snapshot each page's current
-    // Notion body into the object store BEFORE trashing it, so the mass delete stays
-    // fully reversible, and log loudly.
+    // Mass-delete guard: a large-but-partial disappearance (an interrupted checkout, a
+    // case-fold rename, a botched rebase) shouldn't silently trash a big slice of the
+    // mirror. The whole-tree case is caught above; here, once missing files exceed ~20%
+    // of a non-trivial tree, snapshot each page's current Notion body before trashing
+    // it so the mass delete stays reversible, and log loudly.
     let total = on_disk.len() + missing.len();
     let ratio = if total == 0 {
         0.0

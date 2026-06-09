@@ -37,9 +37,8 @@ pub struct Engine {
     /// Our own integration's bot user id, for echo-loop suppression.
     pub bot_user_id: String,
     /// Paths the daemon itself just wrote to disk during a pull, mapped to
-    /// (hash_we_wrote, when). The local watcher consults this so it can tell its own
-    /// pull-writes apart from a user's edit and skip them, instead of relying on
-    /// sync_file's content_hash check winning a race against the pull's bookkeeping.
+    /// (hash_we_wrote, when), so the watcher can skip its own pull-writes instead of
+    /// echoing them back to Notion.
     pub self_writes: Mutex<HashMap<String, (String, Instant)>>,
 }
 
@@ -55,10 +54,7 @@ pub struct PageBody {
 
 /// Reassemble a page's code-block runs into file bytes in document order, counting
 /// foreign (non-code, non-subpage) blocks so the caller can refuse a truncated pull.
-/// Split out of read_page_body so the reassembly is testable without the network, and
-/// it consumes `blocks`: each run's text is copied once straight into the output
-/// instead of being cloned into an intermediate Vec<Vec<String>> and copied a second
-/// time during reassembly.
+/// Split out of read_page_body so it's testable without the network.
 fn reassemble_page_body(blocks: Vec<BlockResp>) -> PageBody {
     let mut text = String::new();
     let mut foreign_blocks = 0usize;
@@ -269,11 +265,8 @@ impl Engine {
         let hash = hashutil::hash_str(&content);
         let mtime_ns = util::file_mtime_ns(&abs);
 
-        // Echo guard: if this exact content is something the daemon just wrote to disk
-        // itself during a pull, the filesystem event was caused by our own write. Skip
-        // it instead of pushing the just-pulled content straight back to Notion. The
-        // watcher cannot otherwise tell its own pull-writes from a user edit, and this
-        // does not depend on the pull's state bookkeeping having committed yet.
+        // Echo guard: if this exact content is what the daemon just wrote during a pull,
+        // the filesystem event is our own write. Skip it instead of pushing it back.
         if self.is_self_write(rel_path, &hash).await {
             return Ok(());
         }
@@ -384,9 +377,8 @@ impl Engine {
             Ok(_) => {}
         }
         // Pre-push backup: save the current Notion body before overwriting it, so a bad
-        // local edit that clobbers good remote content stays recoverable. This costs one
-        // extra read round-trip per overwrite (acknowledged in the design notes) and is
-        // best-effort, so a capture failure never blocks the push.
+        // local edit that clobbers good remote content stays recoverable. Best-effort:
+        // a capture failure never blocks the push.
         let prev_hash = match self.read_page_body(node).await {
             Ok(body) => {
                 self.capture(
@@ -404,21 +396,16 @@ impl Engine {
             }
         };
         // Append the fresh body BEFORE trashing the old blocks. If we deleted first and
-        // the append then failed (crash, rate-limit, network), the page would be left
-        // blank with the only copy of the content gone. Appending first means a failure
-        // leaves the old body intact; the worst case is a transient duplicate that the
-        // next successful sync cleans up. Notion appends children in order at the end of
-        // the page, so the new blocks form a contiguous, correctly-ordered body.
+        // the append failed, the page would be left blank with the content gone.
+        // Appending first leaves the old body intact on failure; the worst case is a
+        // transient duplicate the next sync cleans up.
         //
-        // We trash only the tracked body blocks, not arbitrary children: human-added
-        // foreign blocks are intentionally left untouched on a plain push. They are
-        // detected on the next pull (read_page_body's foreign_blocks count) and cleaned
-        // by the force_push rebuild in resolve_pull, which deletes every child (#19).
+        // Only the tracked body blocks are trashed, not arbitrary children: human-added
+        // foreign blocks survive a plain push and are cleaned by the force_push rebuild
+        // in resolve_pull on the next pull.
         let block_ids = self
             .append_body(&node.notion_page_id, content, rel_path)
             .await?;
-        // node stays borrowed (it is not cloned into `updated` until below), so walk its
-        // block ids in place instead of cloning them into a throwaway Vec.
         for id in &node.body_block_ids {
             if let Err(e) = self.api.delete_block(id).await {
                 warn!(rel_path, block = %id, error = %e, "failed to trash old block; continuing");
@@ -533,9 +520,8 @@ impl Engine {
             warn!(rel_path, error = %e, "failed to trash page");
         }
         // Trashing a directory page also trashes every descendant page in Notion, so
-        // the matching state rows must be removed too, otherwise they linger as
-        // orphans pointing at trashed pages and the poller keeps probing them (#5).
-        // For a plain file, delete_subtree matches only its own row.
+        // the matching state rows must go too, or they linger as orphans pointing at
+        // trashed pages. For a plain file, delete_subtree matches only its own row.
         let removed = {
             let st = self.state.lock().await;
             st.delete_subtree(rel_path).map_err(|e| e.to_string())?
@@ -632,10 +618,9 @@ impl Engine {
         );
         let callout = serde_json::to_value(CalloutBlockReq::warning(msg)).unwrap();
 
-        // If a real page already exists at this path (a file that used to be text and
-        // is now binary/oversized, or an adopted page), REUSE it. Creating a fresh page
-        // would orphan the original, leaving an untrashed duplicate racing for the path,
-        // exactly the bug this guards against (#2).
+        // If a real page already exists at this path (a file that was text and is now
+        // binary/oversized, or an adopted page), REUSE it. A fresh page would orphan the
+        // original, leaving an untrashed duplicate racing for the path.
         if let Some(node) = existing {
             match self.api.get_page(&node.notion_page_id).await {
                 Ok(page) if !page.trashed() => {
@@ -728,9 +713,8 @@ impl Engine {
         let abs = self.abs_path(rel_path);
         let bytes = tokio::fs::read(&abs).await.map_err(|e| e.to_string())?;
         // Mirror sync_file's guards: never push an oversized or binary file as corrupted
-        // text; emit a placeholder instead. classify_text sniffs and decodes in one pass
-        // and surfaces residual invalid UTF-8 as binary rather than silently mangling it,
-        // preserving the NUL-before-UTF-8 precedence (#18).
+        // text; emit a placeholder instead. classify_text sniffs and decodes in one pass,
+        // surfacing invalid UTF-8 as binary rather than mangling it.
         if bytes.len() as u64 > self.max_file_bytes_for(rel_path) {
             return self.ensure_placeholder(rel_path, &bytes, "too large").await;
         }
@@ -803,10 +787,9 @@ mod tests {
 
     #[test]
     fn reassembles_code_in_order_skips_child_pages_counts_foreign() {
-        // Code runs concatenate in document order, across blocks and across runs within
-        // a block. child_page subpages are not body and are skipped without counting;
-        // any other block type (a structured-edit paragraph, say) is foreign, which is
-        // what lets the caller refuse to overwrite disk with a truncated reassembly.
+        // Code runs concatenate in document order. child_page subpages are skipped
+        // without counting; any other block type is foreign, which lets the caller
+        // refuse to overwrite disk with a truncated reassembly.
         let blocks = blocks_from(serde_json::json!([
             {"id": "b1", "type": "code", "last_edited_time": "t",
              "code": {"rich_text": [{"plain_text": "fn main() {\n"}, {"plain_text": "\tok();\n"}], "language": "rust"}},

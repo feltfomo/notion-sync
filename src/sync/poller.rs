@@ -1,18 +1,16 @@
 //! Notion poller. Periodically scans tracked file pages for external changes and
-//! pulls them down. Three efficiency/robustness measures layer on top of the basic
-//! scan:
+//! pulls them down. Three measures layer on top of the basic scan:
 //!
-//! * #8 one paginated POST /v1/search per cycle yields last-edit timestamps for many
-//!   pages at once, so unchanged nodes are skipped WITHOUT an individual GET
-//!   /v1/pages call (the old behavior was O(N) GETs every cycle).
+//! * one paginated POST /v1/search per cycle yields last-edit timestamps for many
+//!   pages at once, so unchanged nodes are skipped without an individual GET /v1/pages.
 //! * idle backoff: quiet cycles stretch the interval up to a cap; any detected change
 //!   snaps it back to the configured floor.
-//! * #17 periodic root health-check: confirm the configured parent page is still
-//!   reachable so a revoked share / trashed root surfaces loudly.
+//! * periodic root health-check: confirm the configured parent page is still reachable
+//!   so a revoked share / trashed root surfaces loudly.
 //!
 //! Echo-loop suppression skips pages whose latest edit was authored by our own
 //! integration bot AND whose content still matches what we last synced; a bot-attributed
-//! page whose body has actually diverged (a human edit in the same window) is still pulled.
+//! page whose body has actually diverged is still pulled.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,12 +27,9 @@ const HEALTH_CHECK_EVERY: u32 = 20;
 /// Hard ceiling on the idle-poll backoff, in seconds.
 ///
 /// Remote (Notion) edits have no push-style event to wake us; the only way we notice
-/// one is the next poll, so the idle backoff is felt *directly* as Notion->local sync
-/// latency. This previously climbed to 10 minutes, which let an AI/remote edit sit
-/// unsynced long enough that the instant local->Notion watcher push almost always won
-/// the race -- the "edits never land / it overwrites me" report. The idle API savings
-/// past a minute or two are negligible (one search call per cycle), so we cap the
-/// backoff near the floor and keep remote edits landing promptly.
+/// one is the next poll, so the idle backoff is felt directly as Notion->local sync
+/// latency. The idle API savings past a minute or two are negligible (one search call
+/// per cycle), so cap the backoff near the floor to keep remote edits landing promptly.
 const MAX_IDLE_BACKOFF_SECS: u64 = 90;
 
 /// Ceiling for the idle backoff given the configured poll floor. Never below the floor,
@@ -69,8 +64,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                 match poll_once(&engine).await {
                     Ok(changed) => {
                         if changed > 0 {
-                            // Activity: poll eagerly again. If we had backed off, announce the
-                            // return to the floor so a watcher knows edits land fast again.
+                            // Activity: poll eagerly again, announcing the return to the floor.
                             if delay > floor {
                                 info!(
                                     interval_secs = floor.as_secs(),
@@ -81,10 +75,8 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                         } else {
                             let previous = delay;
                             delay = next_idle_delay(delay, ceil);
-                            // Surface the slow path at info (the per-cycle line below is debug):
-                            // once the tree goes quiet the interval grows, so a Notion edit can
-                            // take up to this long to land. Log only the step up, not every quiet
-                            // cycle, so it explains the lag without spamming.
+                            // Log only the step up, not every quiet cycle: once the tree goes
+                            // quiet the interval grows, so a Notion edit can take up to this long.
                             if delay > previous {
                                 info!(
                                     interval_secs = delay.as_secs(),
@@ -116,8 +108,8 @@ async fn poll_once(engine: &Arc<Engine>) -> Result<usize, String> {
             .map_err(|e| e.to_string())?
     };
 
-    // #8: one paginated search gives last-edit timestamps for many pages, letting us
-    // skip unchanged nodes without a per-node GET. Pages absent from the map (huge
+    // One paginated search gives last-edit timestamps for many pages, letting us skip
+    // unchanged nodes without a per-node GET. Pages absent from the map (huge
     // workspaces, pagination cap, search lag) fall back to an individual fetch.
     let recent: HashMap<String, String> = match engine.api.search_pages_by_last_edited().await {
         Ok(pairs) => pairs.into_iter().collect(),
@@ -146,7 +138,7 @@ async fn poll_once(engine: &Arc<Engine>) -> Result<usize, String> {
             }
         };
 
-        // #4: a trashed remote page is a remote-delete signal. Mirror it locally
+        // A trashed remote page is a remote-delete signal. Mirror it locally
         // (snapshot + unlink + drop rows) rather than pulling a body that's gone.
         if page.trashed() {
             info!(rel_path = %node.rel_path, "remote page trashed; applying remote delete locally");
@@ -165,14 +157,12 @@ async fn poll_once(engine: &Arc<Engine>) -> Result<usize, String> {
 
         // Echo suppression: the latest edit looks like ours (bot-authored).
         //
-        // `last_edited_by` reports only the *most recent* editor, so a human edit that
-        // lands in the same window as one of our own writes is attributed to the bot.
-        // Trusting it alone silently drops that human edit. So when a page looks
-        // bot-authored we VERIFY by content: reassemble the remote body and compare its
-        // hash to what we last synced. Identical content is a true echo (skip); any
-        // divergence is a real edit we must still pull. A body we can't read cleanly
-        // (unreadable, or split into foreign blocks) is never treated as an echo -- we
-        // fall through so resolve_pull can handle or repair it.
+        // `last_edited_by` reports only the most recent editor, so a human edit landing
+        // in the same window as one of our writes is attributed to the bot. So when a
+        // page looks bot-authored, VERIFY by content: reassemble the remote body and
+        // compare its hash to what we last synced. Identical is a true echo (skip); any
+        // divergence is a real edit to pull. A body we can't read cleanly is never an
+        // echo -- fall through so resolve_pull can handle or repair it.
         let looks_self_authored = page
             .last_edited_by
             .as_ref()
@@ -206,8 +196,8 @@ async fn poll_once(engine: &Arc<Engine>) -> Result<usize, String> {
     Ok(changed)
 }
 
-/// #17: confirm the configured root page is still reachable; a revoked share or a
-/// trashed root otherwise manifests only as confusing per-file failures.
+/// Confirm the configured root page is still reachable; a revoked share or a trashed
+/// root otherwise manifests only as confusing per-file failures.
 async fn health_check(engine: &Arc<Engine>) {
     // One mapping at a time: a single revoked share or unmounted root should surface as
     // its own clearly-labeled warning, not hide behind the first mapping that happens
@@ -240,9 +230,8 @@ mod tests {
 
     #[test]
     fn idle_backoff_is_bounded_near_the_floor() {
-        // The fix: a quiet daemon must keep checking often enough that remote edits
-        // land promptly. With the default 45s floor the worst case is 90s, not the old
-        // 10 minutes that let the watcher push win every race.
+        // A quiet daemon must keep checking often enough that remote edits land
+        // promptly. With the default 45s floor the worst case is 90s.
         let floor = Duration::from_secs(45);
         let ceil = idle_backoff_ceiling(floor);
         assert_eq!(ceil, Duration::from_secs(90));
