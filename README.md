@@ -62,7 +62,7 @@ To check nothing got mangled in transit, download `SHA256SUMS` into the same fol
 With cargo (needs Rust >= 1.74):
 
 ```sh
-cargo install --git https://github.com/feltfomo/notion-sync --tag v0.2.0
+cargo install --git https://github.com/feltfomo/notion-sync --tag v0.2.1
 ```
 
 From a checkout:
