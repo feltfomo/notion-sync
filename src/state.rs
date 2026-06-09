@@ -64,6 +64,16 @@ impl State {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // WAL already fsyncs the log on every commit; synchronous=NORMAL drops the extra
+        // full-database fsync per commit and syncs at checkpoint instead. In WAL mode this
+        // is still crash-safe: the DB is never corrupted, and an application crash (panic,
+        // kill, SIGTERM) loses nothing. The only exposure is that a power loss or OS-level
+        // crash can roll back the last un-checkpointed transactions -- and those are just
+        // mapping/journal rows the next reconcile re-derives by rescanning, so the mirror
+        // self-heals rather than breaking. temp_store=MEMORY keeps SQLite's transient
+        // tables and indices (the state DB is tiny) in RAM off the disk entirely.
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.pragma_update(None, "temp_store", "MEMORY")?;
         let s = State { conn };
         s.migrate()?;
         Ok(s)
@@ -667,5 +677,38 @@ mod tests {
         let only_a = st.list_journal(Some("a.rs"), 10).unwrap();
         assert_eq!(only_a.len(), 1);
         assert_eq!(only_a[0].action, "push_overwrite");
+    }
+
+    #[test]
+    fn open_sets_wal_and_durability_pragmas() {
+        // open() (the on-disk path) must keep WAL and pin synchronous=NORMAL (1) and
+        // temp_store=MEMORY (2). NORMAL is only crash-safe under WAL, so this guards
+        // against journal_mode silently regressing out from under it. open_in_memory()
+        // is a separate, diskless path and intentionally not covered here.
+        let path =
+            std::env::temp_dir().join(format!("notion-sync-pragma-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let st = State::open(&path).unwrap();
+        let journal_mode: String = st
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        let synchronous: i64 = st
+            .conn
+            .query_row("PRAGMA synchronous", [], |r| r.get(0))
+            .unwrap();
+        let temp_store: i64 = st
+            .conn
+            .query_row("PRAGMA temp_store", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        assert_eq!(synchronous, 1, "synchronous=NORMAL is 1");
+        assert_eq!(temp_store, 2, "temp_store=MEMORY is 2");
+
+        drop(st);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
     }
 }

@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-06-08
+
+### Changed
+- **state.db durability: `synchronous=NORMAL` under WAL.** Dropped the per-commit
+  full-database fsync in favor of syncing at checkpoint. This stays crash-safe: the
+  database is never corrupted and an application crash (panic, kill, SIGTERM) loses
+  nothing. The only tradeoff is that a power loss or hard OS crash can roll back the most
+  recent un-checkpointed transactions -- and those are mapping/journal rows the next
+  reconcile re-derives by rescanning, so the mirror self-heals. Also sets
+  `temp_store=MEMORY` to keep SQLite's transient tables off disk.
+
 ## [0.2.0] - 2026-06-08
 
 ### Added
@@ -57,5 +68,6 @@ All notable changes to this project are documented here. The format is based on
 - Initial one-way mirror (local -> Notion) with watcher, poller, reconcile, local-wins
   conflict handling, and the chunk fidelity probe.
 
+[0.2.1]: https://github.com/feltfomo/notion-sync/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/feltfomo/notion-sync/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/feltfomo/notion-sync/releases/tag/v0.1.0
