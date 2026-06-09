@@ -26,10 +26,31 @@ use crate::hashutil;
 /// Run the root health-check once every this many poll cycles.
 const HEALTH_CHECK_EVERY: u32 = 20;
 
+/// Hard ceiling on the idle-poll backoff, in seconds.
+///
+/// Remote (Notion) edits have no push-style event to wake us; the only way we notice
+/// one is the next poll, so the idle backoff is felt *directly* as Notion->local sync
+/// latency. This previously climbed to 10 minutes, which let an AI/remote edit sit
+/// unsynced long enough that the instant local->Notion watcher push almost always won
+/// the race -- the "edits never land / it overwrites me" report. The idle API savings
+/// past a minute or two are negligible (one search call per cycle), so we cap the
+/// backoff near the floor and keep remote edits landing promptly.
+const MAX_IDLE_BACKOFF_SECS: u64 = 90;
+
+/// Ceiling for the idle backoff given the configured poll floor. Never below the floor,
+/// so a deployment that deliberately polls slowly is still honored.
+fn idle_backoff_ceiling(floor: Duration) -> Duration {
+    std::cmp::max(floor, Duration::from_secs(MAX_IDLE_BACKOFF_SECS))
+}
+
+/// Next delay after a quiet cycle: double, but never past the ceiling.
+fn next_idle_delay(delay: Duration, ceiling: Duration) -> Duration {
+    std::cmp::min(delay.saturating_mul(2), ceiling)
+}
+
 pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver<bool>) {
     let floor = Duration::from_secs(engine.cfg.poll_interval_secs.max(1));
-    // Cap idle backoff at 16x the floor, or 10 minutes, whichever is smaller.
-    let ceil = std::cmp::min(floor.saturating_mul(16), Duration::from_secs(600));
+    let ceil = idle_backoff_ceiling(floor);
     let mut delay = floor;
     let mut cycle: u32 = 0;
     info!(secs = engine.cfg.poll_interval_secs, "poller started");
@@ -48,9 +69,28 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                 match poll_once(&engine).await {
                     Ok(changed) => {
                         if changed > 0 {
-                            delay = floor; // activity: keep polling eagerly
+                            // Activity: poll eagerly again. If we had backed off, announce the
+                            // return to the floor so a watcher knows edits land fast again.
+                            if delay > floor {
+                                info!(
+                                    interval_secs = floor.as_secs(),
+                                    "Notion activity; poll interval back to floor"
+                                );
+                            }
+                            delay = floor;
                         } else {
-                            delay = std::cmp::min(delay.saturating_mul(2), ceil);
+                            let previous = delay;
+                            delay = next_idle_delay(delay, ceil);
+                            // Surface the slow path at info (the per-cycle line below is debug):
+                            // once the tree goes quiet the interval grows, so a Notion edit can
+                            // take up to this long to land. Log only the step up, not every quiet
+                            // cycle, so it explains the lag without spamming.
+                            if delay > previous {
+                                info!(
+                                    interval_secs = delay.as_secs(),
+                                    "no recent activity; backing off, Notion edits may take up to this long to land"
+                                );
+                            }
                             debug!(next_secs = delay.as_secs(), "idle cycle; backing off");
                         }
                     }
@@ -186,5 +226,39 @@ async fn health_check(engine: &Arc<Engine>) {
         Err(e) => {
             warn!(parent = %engine.cfg.parent_page_id, error = %e, "root health-check failed")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn idle_backoff_is_bounded_near_the_floor() {
+        // The fix: a quiet daemon must keep checking often enough that remote edits
+        // land promptly. With the default 45s floor the worst case is 90s, not the old
+        // 10 minutes that let the watcher push win every race.
+        let floor = Duration::from_secs(45);
+        let ceil = idle_backoff_ceiling(floor);
+        assert_eq!(ceil, Duration::from_secs(90));
+
+        // Backoff doubles from the floor, lands on the ceiling, and never climbs past it.
+        let mut delay = floor;
+        delay = next_idle_delay(delay, ceil);
+        assert_eq!(delay, Duration::from_secs(90));
+        for _ in 0..10 {
+            delay = next_idle_delay(delay, ceil);
+            assert!(delay <= ceil, "idle backoff must never exceed the ceiling");
+        }
+        assert_eq!(delay, Duration::from_secs(90));
+    }
+
+    #[test]
+    fn idle_ceiling_never_drops_below_a_long_floor() {
+        // A deployment that intentionally polls slowly is still honored: the ceiling
+        // can't fall below the configured floor, which would poll faster than asked.
+        let floor = Duration::from_secs(120);
+        assert_eq!(idle_backoff_ceiling(floor), floor);
+        assert_eq!(next_idle_delay(floor, idle_backoff_ceiling(floor)), floor);
     }
 }

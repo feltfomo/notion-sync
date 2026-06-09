@@ -15,6 +15,16 @@ All notable changes to this project are documented here. The format is based on
   reconcile re-derives by rescanning, so the mirror self-heals. Also sets
   `temp_store=MEMORY` to keep SQLite's transient tables off disk.
 
+### Fixed
+- **Notion -> local edits land promptly again.** The idle poll backoff was allowed to
+  climb to 10 minutes, but remote edits have no push event to wake the daemon, so on a
+  long-idle daemon a Notion/AI edit could sit unsynced for minutes while the instant
+  local -> Notion watcher push won the race -- the edit appeared to never land or to get
+  overwritten. The idle backoff now caps at 90s (was 600s), bounding worst-case
+  remote-edit latency with no measurable increase in idle API traffic (one search call
+  per cycle). The poller now also logs at `info` when it backs off and when it returns
+  to the floor, so a slow pull shows up in the journal instead of looking like a hang.
+
 ## [0.2.0] - 2026-06-08
 
 ### Added
