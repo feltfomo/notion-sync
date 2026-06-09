@@ -53,6 +53,35 @@ pub struct PageBody {
     pub foreign_blocks: usize,
 }
 
+/// Reassemble a page's code-block runs into file bytes in document order, counting
+/// foreign (non-code, non-subpage) blocks so the caller can refuse a truncated pull.
+/// Split out of read_page_body so the reassembly is testable without the network, and
+/// it consumes `blocks`: each run's text is copied once straight into the output
+/// instead of being cloned into an intermediate Vec<Vec<String>> and copied a second
+/// time during reassembly.
+fn reassemble_page_body(blocks: Vec<BlockResp>) -> PageBody {
+    let mut text = String::new();
+    let mut foreign_blocks = 0usize;
+    for b in blocks {
+        let BlockResp { ty, code, .. } = b;
+        match ty.as_str() {
+            "code" => {
+                if let Some(code) = code {
+                    for run in code.rich_text {
+                        text.push_str(&run.plain_text);
+                    }
+                }
+            }
+            "child_page" => {} // nested file/dir subpage, not part of this body
+            _ => foreign_blocks += 1,
+        }
+    }
+    PageBody {
+        text,
+        foreign_blocks,
+    }
+}
+
 impl Engine {
     pub fn abs_path(&self, rel: &str) -> PathBuf {
         self.cfg.local_root.join(rel)
@@ -659,24 +688,7 @@ impl Engine {
             .list_children(&node.notion_page_id)
             .await
             .map_err(|e| e.to_string())?;
-        let mut per_block: Vec<Vec<String>> = Vec::new();
-        let mut foreign_blocks = 0usize;
-        for b in &blocks {
-            match b.ty.as_str() {
-                "code" => per_block.push(
-                    b.code
-                        .as_ref()
-                        .map(|c| c.rich_text.iter().map(|r| r.plain_text.clone()).collect())
-                        .unwrap_or_default(),
-                ),
-                "child_page" => {} // nested file/dir subpage, not part of this body
-                _ => foreign_blocks += 1,
-            }
-        }
-        Ok(PageBody {
-            text: chunk::reassemble(&per_block),
-            foreign_blocks,
-        })
+        Ok(reassemble_page_body(blocks))
     }
 
     /// Rebuild a page's entire body from the local file, deleting *every* existing
@@ -749,4 +761,40 @@ impl Engine {
 /// (keeps the dependency tree lean per the hard constraints).
 pub mod anyhow_lite {
     pub type Result<T = ()> = std::result::Result<T, String>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reassemble_page_body;
+    use crate::api::models::BlockResp;
+
+    fn blocks_from(json: serde_json::Value) -> Vec<BlockResp> {
+        serde_json::from_value(json).expect("valid block fixtures")
+    }
+
+    #[test]
+    fn reassembles_code_in_order_skips_child_pages_counts_foreign() {
+        // Code runs concatenate in document order, across blocks and across runs within
+        // a block. child_page subpages are not body and are skipped without counting;
+        // any other block type (a structured-edit paragraph, say) is foreign, which is
+        // what lets the caller refuse to overwrite disk with a truncated reassembly.
+        let blocks = blocks_from(serde_json::json!([
+            {"id": "b1", "type": "code", "last_edited_time": "t",
+             "code": {"rich_text": [{"plain_text": "fn main() {\n"}, {"plain_text": "\tok();\n"}], "language": "rust"}},
+            {"id": "b2", "type": "child_page", "last_edited_time": "t", "child_page": {"title": "nested"}},
+            {"id": "b3", "type": "paragraph", "last_edited_time": "t"},
+            {"id": "b4", "type": "code", "last_edited_time": "t",
+             "code": {"rich_text": [{"plain_text": "}\n"}], "language": "rust"}}
+        ]));
+        let body = reassemble_page_body(blocks);
+        assert_eq!(body.text, "fn main() {\n\tok();\n}\n");
+        assert_eq!(body.foreign_blocks, 1);
+    }
+
+    #[test]
+    fn empty_page_reassembles_to_empty_with_no_foreign() {
+        let body = reassemble_page_body(blocks_from(serde_json::json!([])));
+        assert_eq!(body.text, "");
+        assert_eq!(body.foreign_blocks, 0);
+    }
 }

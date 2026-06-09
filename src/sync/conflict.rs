@@ -53,7 +53,7 @@ pub async fn resolve_pull(engine: &Engine, node: &Node) -> anyhow_lite::Result {
                 Some(&node.notion_page_id),
                 "local",
                 "pre-pull",
-                local_bytes.clone(),
+                local_bytes,
             )
             .await;
         // Record this as our own write BEFORE touching disk so the local watcher can
@@ -61,7 +61,7 @@ pub async fn resolve_pull(engine: &Engine, node: &Node) -> anyhow_lite::Result {
         // re-pushing the just-pulled content straight back to Notion.
         engine.note_self_write(&node.rel_path, &notion_hash).await;
         // Clean fast-forward from Notion -> disk (async atomic write).
-        util::atomic_write(&abs, notion_content.clone().into_bytes())
+        util::atomic_write(&abs, notion_content.into_bytes())
             .await
             .map_err(|e| e.to_string())?;
         info!(rel_path = %node.rel_path, "applied Notion edit to local file");
@@ -94,7 +94,7 @@ pub async fn resolve_pull(engine: &Engine, node: &Node) -> anyhow_lite::Result {
     if let Some(parent) = backup.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
     }
-    if let Err(e) = util::atomic_write(&backup, notion_content.clone().into_bytes()).await {
+    if let Err(e) = util::atomic_write(&backup, notion_content.into_bytes()).await {
         warn!(rel_path = %node.rel_path, error = %e, "failed to write conflict backup");
     } else {
         warn!(rel_path = %node.rel_path, backup = %backup.display(),
