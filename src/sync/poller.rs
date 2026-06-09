@@ -19,7 +19,6 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use super::engine::Engine;
-use crate::hashutil;
 
 /// Run the root health-check once every this many poll cycles.
 const HEALTH_CHECK_EVERY: u32 = 20;
@@ -169,13 +168,12 @@ async fn poll_once(engine: &Arc<Engine>) -> Result<usize, String> {
             .map(|u| u.id == engine.bot_user_id)
             .unwrap_or(false);
         if looks_self_authored {
-            let is_echo = match engine.read_page_body(&node).await {
-                Ok(body) if body.foreign_blocks == 0 => {
-                    node.content_hash.as_deref() == Some(hashutil::hash_str(&body.text).as_str())
-                }
-                _ => false,
-            };
-            if is_echo {
+            // last_edited_by names only the latest editor, so a human edit landing in
+            // the same window as one of our writes is attributed to the bot. Verify by
+            // content: the remote body must still hash to what we last synced for this to
+            // be our own echo. The content check lives on the engine so the webhook
+            // worker can share the exact same rule against its event `authors`.
+            if engine.remote_body_matches_last_sync(&node).await {
                 debug!(rel_path = %node.rel_path, "skipping self-authored edit (content matches last sync)");
                 // Record the new timestamp so we don't re-evaluate it forever.
                 let mut updated = node.clone();

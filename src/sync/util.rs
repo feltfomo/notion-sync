@@ -61,7 +61,8 @@ pub struct WalkEntry {
 }
 
 // Yields parents before children so directory pages exist before their contents.
-pub fn walk(root: &Path, ignore: &[String]) -> std::io::Result<Vec<WalkEntry>> {
+// Private: the only entry point is the async `walk_async` wrapper below.
+fn walk(root: &Path, ignore: &[String]) -> std::io::Result<Vec<WalkEntry>> {
     let mut out = Vec::new();
     walk_inner(root, root, ignore, &mut out)?;
     Ok(out)

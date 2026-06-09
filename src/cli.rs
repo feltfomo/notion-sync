@@ -364,15 +364,10 @@ async fn restore_cmd(
             .capture(path, None, "local", "pre-restore", cur)
             .await;
     }
-    if let Some(parent) = abs.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-    // Atomic publish (temp + rename), dependency-free.
-    let tmp = abs.with_extension("notion-sync.restore.tmp");
-    tokio::fs::write(&tmp, &bytes)
-        .await
-        .map_err(|e| e.to_string())?;
-    tokio::fs::rename(&tmp, &abs)
+    // Atomic publish via the shared helper (temp + fsync + rename), so a crash mid-
+    // restore can't leave a half-written file and the restored bytes are durable on
+    // return. atomic_write creates the parent dir itself.
+    crate::sync::util::atomic_write(&abs, bytes)
         .await
         .map_err(|e| e.to_string())?;
     info!(path, snapshot = snap.id, "restored file from snapshot");

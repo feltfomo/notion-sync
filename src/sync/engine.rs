@@ -175,7 +175,7 @@ impl Engine {
     /// Resolve the Notion parent page id for a node at `rel_path`.
     /// Root-level nodes hang off the configured parent page; nested nodes hang off
     /// the page of their parent directory (which must already be tracked).
-    async fn parent_page_for(&self, rel_path: &str) -> Option<String> {
+    pub(crate) async fn parent_page_for(&self, rel_path: &str) -> Option<String> {
         let parent_rel = util::parent_rel(rel_path);
         // A node whose parent_rel is exactly a mapping name sits at that mapping's root,
         // so it hangs off the mapping's configured parent page. Otherwise the parent is
@@ -694,12 +694,34 @@ impl Engine {
     /// a file carries its own code fences; we count those as `foreign_blocks` so the
     /// caller can refuse the pull instead of writing a truncated reassembly.
     pub async fn read_page_body(&self, node: &Node) -> anyhow_lite::Result<PageBody> {
+        self.read_page_body_by_id(&node.notion_page_id).await
+    }
+
+    /// Read + reassemble a page's body by its Notion page id, without a tracked Node.
+    /// The webhook discovery path has only a bare page id from the event payload, so it
+    /// reuses this directly; `read_page_body` is the Node-keyed convenience wrapper.
+    pub async fn read_page_body_by_id(&self, page_id: &str) -> anyhow_lite::Result<PageBody> {
         let blocks: Vec<BlockResp> = self
             .api
-            .list_children(&node.notion_page_id)
+            .list_children(page_id)
             .await
             .map_err(|e| e.to_string())?;
         Ok(reassemble_page_body(blocks))
+    }
+
+    /// True if `node`'s current remote body still hashes to exactly what we last synced.
+    /// This is the content half of echo suppression: an edit attributed to our bot is a
+    /// real echo of our own write only if the body still matches. A page with foreign
+    /// blocks (a split mirror) or one we can't read is never an echo, so it falls through
+    /// to be pulled or repaired. The caller owns the bot-attribution check, since the
+    /// poller reads it from `last_edited_by` and the webhook worker from event `authors`.
+    pub async fn remote_body_matches_last_sync(&self, node: &Node) -> bool {
+        match self.read_page_body(node).await {
+            Ok(body) if body.foreign_blocks == 0 => {
+                node.content_hash.as_deref() == Some(hashutil::hash_str(&body.text).as_str())
+            }
+            _ => false,
+        }
     }
 
     /// Rebuild a page's entire body from the local file, deleting *every* existing

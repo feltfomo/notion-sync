@@ -147,7 +147,7 @@ async fn adopt_or_create_dir(engine: &Arc<Engine>, entry: &WalkEntry) -> Result<
         return Ok(());
     }
     // Try to adopt an existing child page with the matching title.
-    if let Some(parent) = parent_page_for(engine, &entry.rel_path).await {
+    if let Some(parent) = engine.parent_page_for(&entry.rel_path).await {
         let title = util::title_for(&entry.rel_path);
         if let Some(existing) = find_child_by_title(engine, &parent, title).await {
             let st = engine.state.lock().await;
@@ -183,7 +183,7 @@ async fn adopt_then_sync_file(engine: &Arc<Engine>, entry: &WalkEntry) -> Result
     };
     if tracked.is_none() {
         // Adopt an existing page if one already sits at this path/title.
-        if let Some(parent) = parent_page_for(engine, &entry.rel_path).await {
+        if let Some(parent) = engine.parent_page_for(&entry.rel_path).await {
             let title = util::title_for(&entry.rel_path);
             if let Some(existing) = find_child_by_title(engine, &parent, title).await {
                 let st = engine.state.lock().await;
@@ -207,20 +207,6 @@ async fn adopt_then_sync_file(engine: &Arc<Engine>, entry: &WalkEntry) -> Result
     }
     // local-wins: push local content (creates if still untracked, overwrites if adopted).
     engine.sync_file(&entry.rel_path).await
-}
-
-async fn parent_page_for(engine: &Arc<Engine>, rel_path: &str) -> Option<String> {
-    let parent_rel = util::parent_rel(rel_path);
-    // A parent_rel that is exactly a mapping name means this node sits at that
-    // mapping's root and hangs off its configured parent page.
-    if let Some(m) = engine.cfg.mapping_by_name(&parent_rel) {
-        return Some(m.parent_page_id.clone());
-    }
-    let st = engine.state.lock().await;
-    st.get_by_path(&parent_rel)
-        .ok()
-        .flatten()
-        .map(|n| n.notion_page_id)
 }
 
 async fn find_child_by_title(

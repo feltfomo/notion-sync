@@ -25,8 +25,10 @@ pub struct ObjectStore {
 }
 
 impl ObjectStore {
-    /// Objects live under `<local_root>/.notion-sync/objects`. Retained for tests and
-    /// for importing a pre-multi-directory install's per-root store.
+    /// Objects live under `<local_root>/.notion-sync/objects`. Test-only: runtime code
+    /// builds the shared store with `open_default`, and the legacy import resolves the
+    /// old per-root path itself, so this convenience constructor is gated to tests.
+    #[cfg(test)]
     pub fn new(local_root: &Path) -> Self {
         ObjectStore {
             objects_dir: local_root.join(".notion-sync").join("objects"),
@@ -143,6 +145,8 @@ impl ObjectStore {
         Ok(out)
     }
 
+    /// Test-only existence check; runtime code reads via `get` / `get_blocking`.
+    #[cfg(test)]
     pub fn exists(&self, hash: &str) -> bool {
         self.path_for(hash).exists()
     }
