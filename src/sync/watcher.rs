@@ -18,7 +18,15 @@ use crate::config::is_ignored;
 
 pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver<bool>) {
     let (raw_tx, mut raw_rx) = mpsc::unbounded_channel::<PathBuf>();
-    let root = engine.cfg.local_root.clone();
+    // Snapshot the roots once so the event loop can map an absolute path back to its
+    // mapping (and apply that mapping's ignore patterns) without locking the engine on
+    // every filesystem event.
+    let roots: Vec<(String, PathBuf, Vec<String>)> = engine
+        .cfg
+        .mappings
+        .iter()
+        .map(|m| (m.name.clone(), m.local_root.clone(), m.ignore.clone()))
+        .collect();
 
     // notify watcher runs on its own thread and pushes absolute paths.
     let tx2 = raw_tx.clone();
@@ -42,11 +50,25 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
             return;
         }
     };
-    if let Err(e) = watcher.watch(&root, RecursiveMode::Recursive) {
-        error!(error = %e, "failed to start recursive watch");
+    // Watch every mapping root. A single unwatchable root (bad permissions, not yet
+    // mounted) is logged and skipped rather than killing the whole watcher; we only
+    // bail if not one root could be watched.
+    let mut watched = 0usize;
+    for (name, root, _) in &roots {
+        match watcher.watch(root, RecursiveMode::Recursive) {
+            Ok(()) => {
+                info!(mapping = %name, root = %root.display(), "watching local tree");
+                watched += 1;
+            }
+            Err(e) => {
+                error!(mapping = %name, root = %root.display(), error = %e, "failed to start recursive watch")
+            }
+        }
+    }
+    if watched == 0 {
+        error!("no local roots could be watched; watcher exiting");
         return;
     }
-    info!(root = %root.display(), "watching local tree");
 
     let debounce = Duration::from_millis(engine.cfg.debounce_ms);
     // Max-wait cap: a continuously-written file keeps pushing its debounce deadline out
@@ -64,10 +86,9 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                 if *shutdown.borrow() { info!("watcher shutting down"); break; }
             }
             Some(abs) = raw_rx.recv() => {
-                if let Some(rel) = to_rel(&root, &abs) {
-                    if rel.is_empty() || is_ignored(std::path::Path::new(&rel), &engine.cfg.ignore) {
-                        continue;
-                    }
+                // to_rel resolves which mapping the path belongs to, applies that
+                // mapping's ignore patterns, and returns the namespaced rel_path.
+                if let Some(rel) = to_rel(&roots, &abs) {
                     debug!(rel, "debouncing event");
                     let now = Instant::now();
                     pending
@@ -106,6 +127,74 @@ async fn dispatch(engine: &Arc<Engine>, rel: &str) {
     }
 }
 
-fn to_rel(root: &std::path::Path, abs: &std::path::Path) -> Option<String> {
-    abs.strip_prefix(root).ok().map(util::rel_to_unix)
+/// Map an absolute filesystem path to its namespaced rel_path (`<mapping>/<within>`),
+/// or `None` if it belongs to no watched root or its mapping ignores it. The
+/// longest-matching root wins so nested mapping roots resolve to the most specific one.
+fn to_rel(roots: &[(String, PathBuf, Vec<String>)], abs: &std::path::Path) -> Option<String> {
+    let mut best: Option<(usize, &str, String, &Vec<String>)> = None;
+    for (name, root, ignore) in roots {
+        if let Ok(within) = abs.strip_prefix(root) {
+            let within_rel = util::rel_to_unix(within);
+            if within_rel.is_empty() {
+                continue; // the root directory itself, never a node
+            }
+            let depth = root.components().count();
+            if best.as_ref().map(|(d, ..)| depth > *d).unwrap_or(true) {
+                best = Some((depth, name, within_rel, ignore));
+            }
+        }
+    }
+    let (_, name, within_rel, ignore) = best?;
+    if is_ignored(std::path::Path::new(&within_rel), ignore) {
+        return None;
+    }
+    Some(format!("{name}/{within_rel}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::to_rel;
+    use std::path::{Path, PathBuf};
+
+    fn roots() -> Vec<(String, PathBuf, Vec<String>)> {
+        vec![
+            (
+                "app".to_string(),
+                PathBuf::from("/home/me/app"),
+                vec!["target".to_string(), ".git".to_string()],
+            ),
+            ("docs".to_string(), PathBuf::from("/home/me/docs"), vec![]),
+        ]
+    }
+
+    #[test]
+    fn maps_into_the_owning_mapping_namespace() {
+        let r = roots();
+        assert_eq!(
+            to_rel(&r, Path::new("/home/me/app/src/main.rs")).as_deref(),
+            Some("app/src/main.rs")
+        );
+        assert_eq!(
+            to_rel(&r, Path::new("/home/me/docs/readme.md")).as_deref(),
+            Some("docs/readme.md")
+        );
+    }
+
+    #[test]
+    fn root_itself_and_unknown_paths_are_none() {
+        let r = roots();
+        assert_eq!(to_rel(&r, Path::new("/home/me/app")), None);
+        assert_eq!(to_rel(&r, Path::new("/somewhere/else/x.rs")), None);
+    }
+
+    #[test]
+    fn applies_the_owning_mappings_ignore_patterns() {
+        let r = roots();
+        assert_eq!(to_rel(&r, Path::new("/home/me/app/target/debug/x")), None);
+        // docs has no ignore list, so a same-named dir there is still synced.
+        assert_eq!(
+            to_rel(&r, Path::new("/home/me/docs/target/notes.md")).as_deref(),
+            Some("docs/target/notes.md")
+        );
+    }
 }

@@ -209,22 +209,27 @@ async fn poll_once(engine: &Arc<Engine>) -> Result<usize, String> {
 /// #17: confirm the configured root page is still reachable; a revoked share or a
 /// trashed root otherwise manifests only as confusing per-file failures.
 async fn health_check(engine: &Arc<Engine>) {
-    // Local side: an unmount or impermanence wipe leaves local_root gone. Surface it
-    // once here instead of as a storm of per-file ENOENT errors during sync (#17 local).
-    if !engine.cfg.local_root.is_dir() {
-        warn!(
-            root = %engine.cfg.local_root.display(),
-            "root health-check: local_root is missing or not a directory"
-        );
-    }
-    match engine.api.get_page(&engine.cfg.parent_page_id).await {
-        Ok(p) if p.trashed() => warn!(
-            parent = %engine.cfg.parent_page_id,
-            "root health-check: configured parent page is in trash"
-        ),
-        Ok(_) => debug!("root health-check ok"),
-        Err(e) => {
-            warn!(parent = %engine.cfg.parent_page_id, error = %e, "root health-check failed")
+    // One mapping at a time: a single revoked share or unmounted root should surface as
+    // its own clearly-labeled warning, not hide behind the first mapping that happens
+    // to be healthy.
+    for m in &engine.cfg.mappings {
+        // Local side: an unmount or impermanence wipe leaves a root gone. Surface it
+        // once here instead of as a storm of per-file ENOENT errors during sync.
+        if !m.local_root.is_dir() {
+            warn!(
+                mapping = %m.name, root = %m.local_root.display(),
+                "root health-check: local_root is missing or not a directory"
+            );
+        }
+        match engine.api.get_page(&m.parent_page_id).await {
+            Ok(p) if p.trashed() => warn!(
+                mapping = %m.name, parent = %m.parent_page_id,
+                "root health-check: configured parent page is in trash"
+            ),
+            Ok(_) => debug!(mapping = %m.name, "root health-check ok"),
+            Err(e) => {
+                warn!(mapping = %m.name, parent = %m.parent_page_id, error = %e, "root health-check failed")
+            }
         }
     }
 }

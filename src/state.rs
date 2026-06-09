@@ -152,9 +152,79 @@ impl State {
             )?;
         }
 
+        if version < 3 {
+            // v3: a tiny key/value table plus a one-time flag for the path-namespacing
+            // migration. Multi-directory support keys every node as `<mapping>/<rel>`,
+            // but a DB created before that has bare paths. We can't re-key here (the
+            // mapping name lives in config, not in this layer), so we only RECORD whether
+            // a migration is owed; the daemon performs it once it has the config. A DB
+            // that already has rows predates namespacing ('0' => owed); a fresh DB is
+            // namespaced by construction ('1').
+            self.conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS meta (
+                  key   TEXT PRIMARY KEY,
+                  value TEXT NOT NULL
+                );
+                "#,
+            )?;
+            let had_rows: i64 = self
+                .conn
+                .query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))?;
+            let flag = if had_rows > 0 { "0" } else { "1" };
+            self.conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('paths_namespaced', ?1) \
+                 ON CONFLICT(key) DO NOTHING",
+                params![flag],
+            )?;
+        }
+
         // Record the schema version we just converged to.
-        self.conn.pragma_update(None, "user_version", 2i64)?;
+        self.conn.pragma_update(None, "user_version", 3i64)?;
         Ok(())
+    }
+
+    /// Whether node/snapshot/journal paths are already namespaced as `<mapping>/<rel>`.
+    /// A pre-multi-directory DB returns false until `namespace_all_paths` runs. An
+    /// absent flag is treated as already-namespaced so a stray re-run can't double the
+    /// prefix.
+    pub fn paths_namespaced(&self) -> rusqlite::Result<bool> {
+        let value: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'paths_namespaced'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(value.as_deref() != Some("0"))
+    }
+
+    /// One-time migration: prefix every node, snapshot, and journal rel_path with
+    /// `<name>/`, then flip the namespaced flag. Returns the number of node rows moved.
+    /// Only valid when the DB was built from a single mapping (the caller enforces this);
+    /// the old rows carry no per-mapping tag, so a multi-mapping DB can't be split here.
+    pub fn namespace_all_paths(&mut self, name: &str) -> rusqlite::Result<usize> {
+        let prefix = format!("{name}/");
+        let tx = self.conn.transaction()?;
+        let moved = tx.execute(
+            "UPDATE nodes SET rel_path = ?1 || rel_path",
+            params![prefix],
+        )?;
+        tx.execute(
+            "UPDATE snapshot SET rel_path = ?1 || rel_path",
+            params![prefix],
+        )?;
+        tx.execute(
+            "UPDATE journal SET rel_path = ?1 || rel_path",
+            params![prefix],
+        )?;
+        tx.execute(
+            "UPDATE meta SET value = '1' WHERE key = 'paths_namespaced'",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(moved)
     }
 
     pub fn upsert(&self, node: &Node) -> rusqlite::Result<()> {
@@ -710,5 +780,34 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn namespace_all_paths_prefixes_every_table() {
+        let mut st = State::open_in_memory().unwrap();
+        st.upsert(&sample("src/main.rs", "h1")).unwrap();
+        st.upsert(&sample("README.md", "h2")).unwrap();
+        st.insert_snapshot("src/main.rs", Some("p1"), "local", "h1", 3, "manual")
+            .unwrap();
+        st.insert_journal("README.md", "create", None, Some("h2"), "to_notion")
+            .unwrap();
+
+        let moved = st.namespace_all_paths("proj").unwrap();
+        assert_eq!(moved, 2);
+
+        // Nodes re-keyed under the mapping name; old bare keys are gone.
+        assert!(st.get_by_path("src/main.rs").unwrap().is_none());
+        assert!(st.get_by_path("proj/src/main.rs").unwrap().is_some());
+        assert!(st.get_by_path("proj/README.md").unwrap().is_some());
+
+        // Snapshot + journal rows follow the same prefixing.
+        assert_eq!(st.list_snapshots("proj/src/main.rs", 10).unwrap().len(), 1);
+        assert_eq!(
+            st.list_journal(Some("proj/README.md"), 10).unwrap().len(),
+            1
+        );
+
+        // Flag is set so a second daemon start is a no-op.
+        assert!(st.paths_namespaced().unwrap());
     }
 }

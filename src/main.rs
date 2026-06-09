@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use tokio::sync::{watch, Mutex};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use notion_sync::api::{NotionClient, RateLimiter};
@@ -61,15 +61,60 @@ async fn build_engine(config_path: &Path, bot_user_id: String) -> Result<Arc<Eng
     let state = Arc::new(Mutex::new(
         State::open_default().map_err(|e| e.to_string())?,
     ));
-    Ok(Arc::new(Engine {
-        cfg: cfg.clone(),
+    let engine = Arc::new(Engine {
+        cfg,
         api,
         state,
         locks: notion_sync::sync::locks::PathLocks::new(),
-        store: notion_sync::sync::snapshot::ObjectStore::new(&cfg.local_root),
+        store: notion_sync::sync::snapshot::ObjectStore::open_default(),
         bot_user_id,
         self_writes: Mutex::new(HashMap::new()),
-    }))
+    });
+    ensure_namespaced(&engine).await?;
+    Ok(engine)
+}
+
+/// One-time migration for a state.db created before multi-directory support: its rows
+/// are keyed by bare paths, but every path is now namespaced as `<mapping>/<rel>`. We
+/// can only do this unambiguously with a single mapping configured, because the old
+/// rows carry no record of which root they came from. With several mappings present and
+/// un-namespaced rows, refuse with guidance rather than guess.
+async fn ensure_namespaced(engine: &Arc<Engine>) -> Result<(), String> {
+    let already = {
+        let st = engine.state.lock().await;
+        st.paths_namespaced().map_err(|e| e.to_string())?
+    };
+    if already {
+        return Ok(());
+    }
+    if engine.cfg.mappings.len() != 1 {
+        return Err(
+            "state.db predates multi-directory support (its paths aren't namespaced), \
+             but the config now lists several mappings, so it's ambiguous which mapping the \
+             existing rows belong to. Run once with only your original mapping in the config \
+             to migrate its state, then add the rest."
+                .into(),
+        );
+    }
+    let name = engine.cfg.mappings[0].name.clone();
+    let old_root = engine.cfg.mappings[0].local_root.clone();
+    let rows = {
+        let mut st = engine.state.lock().await;
+        st.namespace_all_paths(&name).map_err(|e| e.to_string())?
+    };
+    match engine.store.import_legacy_root_store(&old_root) {
+        Ok(0) => {}
+        Ok(blobs) => info!(
+            blobs,
+            "imported legacy snapshot store into the shared store"
+        ),
+        Err(e) => warn!(
+            error = %e,
+            "could not import legacy snapshot store; older snapshots may be unreadable until moved manually"
+        ),
+    }
+    info!(mapping = %name, rows, "migrated state.db to namespaced paths (one-time)");
+    Ok(())
 }
 
 async fn run_daemon(config_path: &Path) -> Result<(), String> {
@@ -81,7 +126,8 @@ async fn run_daemon(config_path: &Path) -> Result<(), String> {
         return Ok(());
     }
     let cfg = Config::load(config_path).map_err(|e| e.to_string())?;
-    info!(local_root = %cfg.local_root.display(), parent = %cfg.parent_page_id, "loaded config");
+    let mapping_names: Vec<&str> = cfg.mappings.iter().map(|m| m.name.as_str()).collect();
+    info!(mappings = cfg.mappings.len(), names = ?mapping_names, "loaded config");
 
     // Shared token bucket: the watcher and poller draw from the SAME limiter.
     let limiter = Arc::new(RateLimiter::notion_default());
@@ -102,14 +148,18 @@ async fn run_daemon(config_path: &Path) -> Result<(), String> {
     ));
 
     let engine = Arc::new(Engine {
-        cfg: cfg.clone(),
+        cfg,
         api,
         state,
         locks: notion_sync::sync::locks::PathLocks::new(),
-        store: notion_sync::sync::snapshot::ObjectStore::new(&cfg.local_root),
+        store: notion_sync::sync::snapshot::ObjectStore::open_default(),
         bot_user_id,
         self_writes: Mutex::new(HashMap::new()),
     });
+
+    // One-time migration of a pre-multi-directory state.db (re-key paths under the
+    // single mapping's name, move its object store into the shared one). No-op after.
+    ensure_namespaced(&engine).await?;
 
     // Startup reconciliation (adopt existing pages, converge disk/state/Notion).
     if let Err(e) = reconcile::run(engine.clone()).await {

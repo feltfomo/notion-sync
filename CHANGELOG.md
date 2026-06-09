@@ -4,6 +4,35 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-09
+
+### Added
+- **Multiple directory mappings.** The config now accepts repeated `[[mapping]]`
+  tables, each with its own `local_root`, `parent_page_id`, and `ignore` list, so one
+  daemon mirrors several directories into several Notion parent pages (a single token
+  can already see many pages). An optional `name` per mapping labels its subtree; it
+  defaults to the final path component of `local_root` and must be unique. A legacy
+  single `[mapping]` table still parses unchanged.
+
+### Changed
+- **State paths are namespaced per mapping.** Every node/snapshot/journal row is keyed
+  as `<mapping>/<path>` so directories with overlapping layouts can't collide. CLI
+  subcommands (`log`, `show`, `restore`, ...) now take these `<mapping>/<path>` keys.
+- **The mass-delete guard is per mapping.** A missing or empty local tree skips only
+  that mapping's reconcile/deletions; the other mappings keep syncing instead of the
+  whole pass aborting.
+- **Shared object store.** The content-addressed snapshot store moved from
+  `<local_root>/.notion-sync/objects` to `$XDG_STATE_HOME/notion-sync/objects` (beside
+  `state.db`), so dedup spans every mapping and no single root owns it.
+
+### Migration
+- A pre-0.3 `state.db` is migrated **automatically on first start, but only when exactly
+  one mapping is configured**: its rows are re-keyed under that mapping's name and its
+  old per-root object store is moved into the shared one. If the config already lists
+  several mappings, the daemon refuses with guidance to run once with the original
+  single mapping first, then add the rest -- the old rows carry no record of which root
+  they belonged to, so splitting them automatically would be a guess.
+
 ## [0.2.1] - 2026-06-09
 
 ### Changed
@@ -83,6 +112,7 @@ All notable changes to this project are documented here. The format is based on
 - Initial one-way mirror (local -> Notion) with watcher, poller, reconcile, local-wins
   conflict handling, and the chunk fidelity probe.
 
+[0.3.0]: https://github.com/feltfomo/notion-sync/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/feltfomo/notion-sync/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/feltfomo/notion-sync/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/feltfomo/notion-sync/releases/tag/v0.1.0

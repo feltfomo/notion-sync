@@ -84,7 +84,19 @@ fn reassemble_page_body(blocks: Vec<BlockResp>) -> PageBody {
 
 impl Engine {
     pub fn abs_path(&self, rel: &str) -> PathBuf {
-        self.cfg.local_root.join(rel)
+        // A namespaced rel_path is `<mapping name>/<path within that mapping's root>`.
+        // Resolve the mapping by its leading segment and join the remainder onto the
+        // mapping's local_root. A bare segment (no '/') is the mapping root itself.
+        match rel.split_once('/') {
+            Some((name, within)) => match self.cfg.mapping_by_name(name) {
+                Some(m) => m.local_root.join(within),
+                None => PathBuf::from(rel),
+            },
+            None => match self.cfg.mapping_by_name(rel) {
+                Some(m) => m.local_root.clone(),
+                None => PathBuf::from(rel),
+            },
+        }
     }
 
     /// Record that the daemon just wrote `hash` to `rel_path` on disk (a pull
@@ -159,8 +171,11 @@ impl Engine {
     /// the page of their parent directory (which must already be tracked).
     async fn parent_page_for(&self, rel_path: &str) -> Option<String> {
         let parent_rel = util::parent_rel(rel_path);
-        if parent_rel.is_empty() {
-            return Some(self.cfg.parent_page_id.clone());
+        // A node whose parent_rel is exactly a mapping name sits at that mapping's root,
+        // so it hangs off the mapping's configured parent page. Otherwise the parent is
+        // another tracked node (a directory subpage).
+        if let Some(m) = self.cfg.mapping_by_name(&parent_rel) {
+            return Some(m.parent_page_id.clone());
         }
         let st = self.state.lock().await;
         st.get_by_path(&parent_rel)

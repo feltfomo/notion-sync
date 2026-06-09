@@ -25,11 +25,79 @@ pub struct ObjectStore {
 }
 
 impl ObjectStore {
-    /// Objects live under `<local_root>/.notion-sync/objects`.
+    /// Objects live under `<local_root>/.notion-sync/objects`. Retained for tests and
+    /// for importing a pre-multi-directory install's per-root store.
     pub fn new(local_root: &Path) -> Self {
         ObjectStore {
             objects_dir: local_root.join(".notion-sync").join("objects"),
         }
+    }
+
+    /// The shared daemon store, under the state dir (alongside state.db) so it is
+    /// independent of any single mapping's root. With several mappings there is no one
+    /// root to hang the store off, and a shared store keeps content-addressed dedup
+    /// working across all of them.
+    pub fn open_default() -> Self {
+        ObjectStore {
+            objects_dir: default_objects_dir(),
+        }
+    }
+
+    /// A store rooted at an explicit objects directory (tests, and the legacy import).
+    pub fn at(objects_dir: PathBuf) -> Self {
+        ObjectStore { objects_dir }
+    }
+
+    /// The directory this store reads and writes blobs under.
+    pub fn objects_dir(&self) -> &Path {
+        &self.objects_dir
+    }
+
+    /// Move every blob from a legacy per-root store (`<old_root>/.notion-sync/objects`)
+    /// into this store, preserving the git-style fanout. Used once when migrating a
+    /// pre-multi-directory install to the shared store so old snapshots stay readable.
+    /// Best-effort per blob; returns how many were moved. A blob already present here
+    /// (content-addressed, so identical) is dropped from the old store rather than
+    /// recopied.
+    pub fn import_legacy_root_store(&self, old_root: &Path) -> std::io::Result<usize> {
+        let old = old_root.join(".notion-sync").join("objects");
+        if !old.is_dir() || old == self.objects_dir {
+            return Ok(0);
+        }
+        let mut moved = 0usize;
+        for a in read_subdirs(&old)? {
+            let Some(a_name) = a.file_name().map(|s| s.to_owned()) else {
+                continue;
+            };
+            for b in read_subdirs(&a)? {
+                let Some(b_name) = b.file_name().map(|s| s.to_owned()) else {
+                    continue;
+                };
+                let dest_dir = self.objects_dir.join(&a_name).join(&b_name);
+                for entry in std::fs::read_dir(&b)?.filter_map(|e| e.ok()) {
+                    let p = entry.path();
+                    if p.extension().and_then(|e| e.to_str()) != Some("gz") {
+                        continue;
+                    }
+                    let Some(fname) = p.file_name().map(|s| s.to_owned()) else {
+                        continue;
+                    };
+                    std::fs::create_dir_all(&dest_dir)?;
+                    let dest = dest_dir.join(&fname);
+                    if dest.exists() {
+                        let _ = std::fs::remove_file(&p); // already deduped here
+                        continue;
+                    }
+                    if std::fs::rename(&p, &dest).is_err() {
+                        // Cross-device (separate filesystem): copy then drop the original.
+                        std::fs::copy(&p, &dest)?;
+                        let _ = std::fs::remove_file(&p);
+                    }
+                    moved += 1;
+                }
+            }
+        }
+        Ok(moved)
     }
 
     fn path_for(&self, hash: &str) -> PathBuf {
@@ -130,6 +198,20 @@ impl ObjectStore {
     }
 }
 
+/// Shared object store dir under $XDG_STATE_HOME/notion-sync/ (mirrors state.db's
+/// location), falling back to ~/.local/state when XDG_STATE_HOME is unset.
+fn default_objects_dir() -> PathBuf {
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            home.join(".local/state")
+        });
+    base.join("notion-sync").join("objects")
+}
+
 fn read_subdirs(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(std::fs::read_dir(dir)?
         .filter_map(|e| e.ok())
@@ -174,5 +256,27 @@ mod tests {
         assert_eq!(removed, 1);
         assert!(store.exists(&keep_hash));
         assert!(!store.exists(&drop_hash));
+    }
+
+    #[test]
+    fn import_legacy_root_store_moves_blobs_into_shared_store() {
+        // Old per-root store with one blob.
+        let old_root = tempfile::tempdir().unwrap();
+        let legacy = ObjectStore::new(old_root.path());
+        let data = b"legacy snapshot bytes".to_vec();
+        let hash = legacy.put_blocking(&data).unwrap();
+        assert!(legacy.exists(&hash));
+
+        // Fresh shared store in a separate location.
+        let shared_dir = tempfile::tempdir().unwrap();
+        let shared = ObjectStore::at(shared_dir.path().join("objects"));
+        assert!(!shared.exists(&hash));
+
+        let moved = shared.import_legacy_root_store(old_root.path()).unwrap();
+        assert_eq!(moved, 1);
+        assert!(shared.exists(&hash));
+        assert_eq!(shared.get_blocking(&hash).unwrap(), data);
+        // The blob was moved, not copied: the old store no longer has it.
+        assert!(!legacy.exists(&hash));
     }
 }

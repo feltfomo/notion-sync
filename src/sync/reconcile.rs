@@ -15,30 +15,55 @@ use crate::api::models::PageResp;
 use crate::state::{Node, NodeKind};
 
 pub async fn run(engine: Arc<Engine>) -> Result<(), String> {
-    info!("starting reconciliation pass");
-    let entries = util::walk_async(engine.cfg.local_root.clone(), engine.cfg.ignore.clone())
-        .await
-        .map_err(|e| e.to_string())?;
+    info!(
+        mappings = engine.cfg.mappings.len(),
+        "starting reconciliation pass"
+    );
 
-    // Safety guard: never treat a missing or empty tree as "the user deleted
-    // everything." Pass 3 below trashes the Notion page for every tracked node that
-    // is absent from disk, so an unreadable root or an empty walk (a mid-`mv` rename,
-    // an unmounted volume, or a misconfigured local_root) would wipe the entire
-    // mirror. Abort the pass instead and leave the mapping untouched.
-    if !engine.cfg.local_root.is_dir() {
-        return Err(format!(
-            "local_root {} is not a readable directory; skipping reconcile to avoid mass deletion",
-            engine.cfg.local_root.display()
-        ));
+    // Walk every mapping up front, namespacing each entry by its mapping name so the
+    // rest of reconcile (and state.db) sees one flat, collision-free path space.
+    //
+    // The empty/missing-tree mass-delete guard is applied PER MAPPING: pass 3 trashes
+    // the Notion page for any tracked node absent from disk, so an unreadable root or
+    // an empty walk (a mid-`mv` rename, an unmounted volume, a typo'd local_root) for
+    // one mapping must not wipe that mapping's mirror -- and must not stall the others.
+    // Only mappings that walked cleanly are "healthy" and eligible for deletions below.
+    let mut on_disk: HashSet<String> = HashSet::new();
+    let mut healthy: HashSet<String> = HashSet::new();
+    let mut entries: Vec<WalkEntry> = Vec::new();
+    for m in &engine.cfg.mappings {
+        if !m.local_root.is_dir() {
+            warn!(
+                mapping = %m.name, root = %m.local_root.display(),
+                "local_root is not a readable directory; skipping this mapping to avoid mass deletion"
+            );
+            continue;
+        }
+        let walked = match util::walk_async(m.local_root.clone(), m.ignore.clone()).await {
+            Ok(w) => w,
+            Err(e) => {
+                warn!(mapping = %m.name, error = %e, "walk failed; skipping this mapping");
+                continue;
+            }
+        };
+        if walked.is_empty() {
+            warn!(
+                mapping = %m.name,
+                "walk returned no entries; skipping this mapping to avoid trashing its mirror"
+            );
+            continue;
+        }
+        healthy.insert(m.name.clone());
+        for mut e in walked {
+            e.rel_path = format!("{}/{}", m.name, e.rel_path);
+            entries.push(e);
+        }
     }
-    if entries.is_empty() {
-        warn!(
-            "local tree walk returned no entries; skipping reconcile to avoid trashing the mirror"
-        );
+
+    if healthy.is_empty() {
+        warn!("no mapping produced a readable, non-empty tree; skipping reconcile to avoid mass deletion");
         return Ok(());
     }
-
-    let mut on_disk: HashSet<String> = HashSet::new();
 
     // Pass 1: directories (parents before children, guaranteed by walk order).
     for entry in entries.iter().filter(|e| e.is_dir) {
@@ -65,9 +90,14 @@ pub async fn run(engine: Arc<Engine>) -> Result<(), String> {
             .all_tracked()
             .map_err(|e| e.to_string())?
     };
+    // Only consider deletions for mappings that walked cleanly this pass. A node whose
+    // mapping was skipped (missing/empty root) or is no longer configured at all is
+    // left untouched rather than trashed, so a transient glitch or a removed mapping
+    // never cascades into deleting its Notion pages.
     let missing: Vec<Node> = tracked
         .into_iter()
         .filter(|n| !on_disk.contains(&n.rel_path))
+        .filter(|n| healthy.contains(n.rel_path.split('/').next().unwrap_or("")))
         .collect();
 
     // Mass-delete guard (#3): a large-but-partial disappearance (an interrupted
@@ -182,8 +212,10 @@ async fn adopt_then_sync_file(engine: &Arc<Engine>, entry: &WalkEntry) -> Result
 
 async fn parent_page_for(engine: &Arc<Engine>, rel_path: &str) -> Option<String> {
     let parent_rel = util::parent_rel(rel_path);
-    if parent_rel.is_empty() {
-        return Some(engine.cfg.parent_page_id.clone());
+    // A parent_rel that is exactly a mapping name means this node sits at that
+    // mapping's root and hangs off its configured parent page.
+    if let Some(m) = engine.cfg.mapping_by_name(&parent_rel) {
+        return Some(m.parent_page_id.clone());
     }
     let st = engine.state.lock().await;
     st.get_by_path(&parent_rel)

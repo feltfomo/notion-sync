@@ -137,10 +137,26 @@ fn backup_path(engine: &Engine, rel_path: &str) -> std::path::PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    engine
+    // Drop the conflict copy under the owning mapping's root (beside the file it
+    // belongs to), stripping the `<mapping>/` namespace prefix from the on-disk name.
+    if let (Some(m), Some((_, within))) = (
+        engine.cfg.mapping_for_path(rel_path),
+        rel_path.split_once('/'),
+    ) {
+        return m
+            .local_root
+            .join(".notion-sync")
+            .join("conflicts")
+            .join(format!("{within}.{ts}"));
+    }
+    // Fallback (untracked/odd path): the first mapping's root, else the cwd.
+    let root = engine
         .cfg
-        .local_root
-        .join(".notion-sync")
+        .mappings
+        .first()
+        .map(|m| m.local_root.clone())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    root.join(".notion-sync")
         .join("conflicts")
         .join(format!("{rel_path}.{ts}"))
 }
