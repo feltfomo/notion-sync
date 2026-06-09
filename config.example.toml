@@ -40,10 +40,24 @@ local_root = "/home/user/projects/myapp"
 parent_page_id = "0123456789abcdef0123456789abcdef"
 
 # Glob-ish ignore patterns. Supports a leading/trailing '*' and exact path segments.
-ignore = [".git", "target", "node_modules", "*.lock", ".notion-sync"]
+ignore = [".git", "target", "node_modules", "*.lock", "result", "dist", ".notion-sync"]
 
 [[mapping]]
 name = "notes"
 local_root = "/home/user/notes"
 parent_page_id = "fedcba9876543210fedcba9876543210"
 ignore = [".git", ".notion-sync"]
+
+# Per-directory overrides (optional)
+# ----------------------------------
+# Drop a `.notion-sync.toml` in any mapped directory to extend its settings without
+# touching this central file. It travels with the directory (commit it to that repo if
+# you like). Only these two keys are honored:
+#
+#   ignore         = ["build", "*.tmp"]   # ADDED to the central ignore list, not replacing it
+#   max_file_bytes = 20000000             # overrides the central cap for this directory only
+#
+# Anything else (parent_page_id, local_root, token_file, ...) is rejected, so a mapping
+# can't be repointed from inside its own tree. The daemon never mirrors `.notion-sync.toml`
+# or the `.notion-sync/` state dir, and never follows symlinks (a `nix build` `result`
+# link is skipped, not synced).

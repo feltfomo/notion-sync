@@ -48,6 +48,21 @@ pub struct RawMapping {
     pub ignore: Vec<String>,
 }
 
+/// The optional per-directory override file (`<local_root>/.notion-sync.toml`). Only
+/// the dir-scoped keys live here; deny_unknown_fields rejects anything that would
+/// repoint the mapping or touch secrets, so a typo fails loudly instead of silently
+/// doing nothing. A missing key inherits from the central config.
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct RawPerDirConfig {
+    /// Extends the central mapping's ignore list (additive, not a replacement).
+    #[serde(default)]
+    pub ignore: Vec<String>,
+    /// Overrides the central max_file_bytes for this directory only.
+    #[serde(default)]
+    pub max_file_bytes: Option<u64>,
+}
+
 fn default_version() -> String {
     "2022-06-28".to_string()
 }
@@ -73,6 +88,9 @@ pub struct Mapping {
     pub local_root: PathBuf,
     pub parent_page_id: String,
     pub ignore: Vec<String>,
+    /// Effective cap for this mapping: the per-dir `.notion-sync.toml` value if it set
+    /// one, else the central `max_file_bytes`.
+    pub max_file_bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -175,11 +193,21 @@ impl Config {
                     rm.local_root.display()
                 )));
             }
+            // Per-directory overrides live in <local_root>/.notion-sync.toml. Optional:
+            // a mapping with no such file is exactly the old central-only behavior.
+            // ignore is additive (central baseline + this dir's extras); max_file_bytes
+            // is a straight override. Registry/secret keys in that file are rejected at
+            // parse time, so a mapping can't be repointed from inside its own tree.
+            let per_dir = load_per_dir(&rm.local_root)?;
+            let mut ignore = rm.ignore;
+            ignore.extend(per_dir.ignore);
+            let max_file_bytes = per_dir.max_file_bytes.unwrap_or(raw.max_file_bytes);
             mappings.push(Mapping {
                 name,
                 local_root: rm.local_root,
                 parent_page_id: rm.parent_page_id,
-                ignore: rm.ignore,
+                ignore,
+                max_file_bytes,
             });
         }
 
@@ -225,6 +253,30 @@ fn derive_mapping_name(
     Ok(name)
 }
 
+/// Load `<local_root>/.notion-sync.toml` if present. A missing file is fine (the mapping
+/// just uses central defaults). A present-but-unreadable or malformed file is an error,
+/// because silently falling back to central defaults is how you end up mirroring
+/// something you meant to ignore and only notice later.
+fn load_per_dir(local_root: &std::path::Path) -> Result<RawPerDirConfig, ConfigError> {
+    let path = local_root.join(".notion-sync.toml");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(RawPerDirConfig::default()),
+        Err(e) => return Err(ConfigError::Read(format!("{}: {e}", path.display()))),
+    };
+    toml::from_str(&text).map_err(|e| {
+        ConfigError::Parse(format!(
+            "{}: {e} (per-directory config accepts only `ignore` and `max_file_bytes`)",
+            path.display()
+        ))
+    })
+}
+
+// The daemon's own state dir and per-directory config file are never mirrored, whatever
+// the user's ignore list says, so a config edit can't accidentally drag the machinery
+// into Notion. Syncthing treats .stignore the same way.
+const ALWAYS_IGNORE: [&str; 2] = [".notion-sync", ".notion-sync.toml"];
+
 // Hand-rolled to avoid a glob-crate dependency: exact match, leading "*.ext", or
 // trailing "build*", tested against every path component.
 pub fn is_ignored(rel_path: &std::path::Path, patterns: &[String]) -> bool {
@@ -232,6 +284,11 @@ pub fn is_ignored(rel_path: &std::path::Path, patterns: &[String]) -> bool {
         .components()
         .filter_map(|c| c.as_os_str().to_str().map(|s| s.to_string()))
         .collect();
+    for comp in &components {
+        if ALWAYS_IGNORE.contains(&comp.as_str()) {
+            return true;
+        }
+    }
     for pat in patterns {
         for comp in &components {
             if glob_match(pat, comp) {
@@ -336,6 +393,93 @@ mod tests {
     }
 
     #[test]
+    fn always_ignores_own_state_dir_and_config_even_with_empty_patterns() {
+        let none: Vec<String> = vec![];
+        assert!(is_ignored(Path::new(".notion-sync/objects/ab/x.gz"), &none));
+        assert!(is_ignored(Path::new(".notion-sync.toml"), &none));
+        assert!(is_ignored(Path::new("sub/.notion-sync.toml"), &none));
+        assert!(!is_ignored(Path::new("src/main.rs"), &none));
+    }
+
+    #[test]
+    fn per_dir_config_parses_allowed_keys_and_rejects_others() {
+        let ok: RawPerDirConfig =
+            toml::from_str("ignore = [\"result\", \"dist\"]\nmax_file_bytes = 1000").unwrap();
+        assert_eq!(ok.ignore, vec!["result", "dist"]);
+        assert_eq!(ok.max_file_bytes, Some(1000));
+        // Registry/secret keys must not silently override the mapping.
+        assert!(toml::from_str::<RawPerDirConfig>("parent_page_id = \"abc\"").is_err());
+        assert!(toml::from_str::<RawPerDirConfig>("local_root = \"/x\"").is_err());
+    }
+
+    // The end-to-end merge: parsing is covered above, but this drives the real
+    // Config::load file read so additive-ignore and the max_file_bytes override can't
+    // silently regress.
+    #[test]
+    fn load_merges_per_dir_overrides_additively_and_leaves_others_central() {
+        use std::io::Write;
+
+        // Unique throwaway workspace so parallel test runs don't collide.
+        let base = std::env::temp_dir().join(format!(
+            "notion-sync-cfgtest-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let with_override = base.join("proj");
+        let without_override = base.join("notes");
+        std::fs::create_dir_all(&with_override).unwrap();
+        std::fs::create_dir_all(&without_override).unwrap();
+
+        // Only the first mapping's root carries a per-directory file.
+        std::fs::write(
+            with_override.join(".notion-sync.toml"),
+            "ignore = [\"build\", \"*.tmp\"]\nmax_file_bytes = 123\n",
+        )
+        .unwrap();
+
+        // token_file keeps the test off $NOTION_TOKEN.
+        let token = base.join("token");
+        std::fs::write(&token, "ntn_test\n").unwrap();
+
+        let cfg_path = base.join("config.toml");
+        let mut f = std::fs::File::create(&cfg_path).unwrap();
+        write!(
+            f,
+            "max_file_bytes = 5000000\n\
+             token_file = {token:?}\n\n\
+             [[mapping]]\n\
+             local_root = {with_override:?}\n\
+             parent_page_id = \"p1\"\n\
+             ignore = [\".git\", \"target\"]\n\n\
+             [[mapping]]\n\
+             local_root = {without_override:?}\n\
+             parent_page_id = \"p2\"\n\
+             ignore = [\".git\"]\n",
+        )
+        .unwrap();
+        drop(f);
+
+        let cfg = Config::load(&cfg_path).expect("config should load");
+        assert_eq!(cfg.mappings.len(), 2);
+
+        let proj = cfg.mapping_by_name("proj").unwrap();
+        // Central baseline kept; the per-dir entries are appended, not a replacement.
+        assert_eq!(proj.ignore, vec![".git", "target", "build", "*.tmp"]);
+        // Per-dir max_file_bytes overrides the central default.
+        assert_eq!(proj.max_file_bytes, 123);
+
+        let notes = cfg.mapping_by_name("notes").unwrap();
+        // No per-dir file: central values pass through untouched.
+        assert_eq!(notes.ignore, vec![".git"]);
+        assert_eq!(notes.max_file_bytes, 5_000_000);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn mapping_for_path_routes_by_first_segment() {
         let cfg = Config {
             notion_version: "v".into(),
@@ -348,12 +492,14 @@ mod tests {
                     local_root: std::path::PathBuf::from("/a"),
                     parent_page_id: "pa".into(),
                     ignore: vec![],
+                    max_file_bytes: 5_000_000,
                 },
                 Mapping {
                     name: "docs".into(),
                     local_root: std::path::PathBuf::from("/d"),
                     parent_page_id: "pd".into(),
                     ignore: vec![],
+                    max_file_bytes: 5_000_000,
                 },
             ],
             token: "t".into(),

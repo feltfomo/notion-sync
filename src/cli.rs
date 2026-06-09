@@ -1,10 +1,11 @@
-//! Command-line interface. The sync daemon (`run`, the default when no subcommand is
-//! given) lives in main.rs; this module owns the clap command model plus every
-//! non-daemon subcommand: the backup/restore/history surface and snapshot GC.
+//! Command-line interface. Two commands are handled in main.rs: the sync daemon
+//! (`run`, the default when no subcommand is given) and the read-only `config`
+//! inspector. Everything else lives here — the clap command model plus every engine-
+//! backed subcommand: the backup/restore/history surface and snapshot GC.
 //!
-//! All of these operate on machine-local state (state.db + the content-addressed
-//! object store); only `untrash` touches the Notion API. Mutating commands accept
-//! `--dry-run`, which logs the intended effect and writes nothing.
+//! Those engine-backed commands operate on machine-local state (state.db + the
+//! content-addressed object store); only `untrash` touches the Notion API. Mutating
+//! commands accept `--dry-run`, which logs the intended effect and writes nothing.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -34,6 +35,9 @@ pub struct Cli {
 pub enum Command {
     /// Run the sync daemon (default when no subcommand is given).
     Run,
+    /// Print the resolved config: every mapping's effective ignore list and size cap
+    /// after per-directory .notion-sync.toml overrides merge in. Read-only, no Notion.
+    Config,
     /// Print the sync journal: the audit trail of every push/pull/delete.
     Log {
         /// Restrict to a single repo-relative path.
@@ -107,11 +111,14 @@ pub enum Command {
     },
 }
 
-/// Run a non-daemon subcommand. `Run` is handled by the daemon entrypoint and never
-/// reaches here.
+/// Run a non-daemon subcommand. `Run` and `Config` are handled in main.rs and never
+/// reach here.
 pub async fn dispatch(engine: Arc<Engine>, command: Command) -> Result<(), String> {
     match command {
         Command::Run => Err("internal: `run` is handled by the daemon entrypoint".into()),
+        Command::Config => {
+            Err("internal: `config` is handled in main before the engine is built".into())
+        }
         Command::Log { path, limit } => log_cmd(&engine, path.as_deref(), limit).await,
         Command::History { path, limit } => history_cmd(&engine, &path, limit).await,
         Command::Show { id, path, at } => {

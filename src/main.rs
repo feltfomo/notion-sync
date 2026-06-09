@@ -40,6 +40,9 @@ async fn real_main(cli: Cli) -> Result<(), String> {
     match cli.command {
         // Daemon is the default when no subcommand is supplied.
         None | Some(Command::Run) => run_daemon(&config_path).await,
+        // Read-only config inspector: no engine, no state.db, no Notion. Just load and
+        // print so per-directory overrides can be eyeballed before trusting a sync.
+        Some(Command::Config) => print_config(&config_path),
         Some(command) => {
             // The non-daemon subcommands need an engine (state + store + api) but not
             // the watcher/poller, and no whoami round-trip (only `untrash` calls out).
@@ -215,6 +218,26 @@ fn ensure_config_exists(path: &std::path::Path) -> Result<bool, String> {
     std::fs::write(path, include_str!("../config.example.toml"))
         .map_err(|e| format!("cannot write starter config {}: {e}", path.display()))?;
     Ok(false)
+}
+
+/// Load the config and print each mapping's effective settings, then exit. Skips the
+/// engine, state.db, and every Notion call on purpose: the point is to verify how
+/// per-directory `.notion-sync.toml` overrides merged (ignore is additive, the size cap
+/// overrides) before trusting the daemon to act on them. Loading still resolves the
+/// token, so a missing $NOTION_TOKEN/token_file fails here too.
+fn print_config(config_path: &Path) -> Result<(), String> {
+    let cfg = Config::load(config_path).map_err(|e| e.to_string())?;
+    println!("config: {}", config_path.display());
+    println!("{} mapping(s):", cfg.mappings.len());
+    for m in &cfg.mappings {
+        println!();
+        println!("  [{}]", m.name);
+        println!("    local_root     {}", m.local_root.display());
+        println!("    parent_page_id {}", m.parent_page_id);
+        println!("    max_file_bytes {}", m.max_file_bytes);
+        println!("    ignore         {:?}", m.ignore);
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

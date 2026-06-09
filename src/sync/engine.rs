@@ -99,6 +99,16 @@ impl Engine {
         }
     }
 
+    /// The size cap for the file at `rel`, taken from its owning mapping (a per-dir
+    /// `.notion-sync.toml` can override it), falling back to the central default for a
+    /// path that resolves to no mapping.
+    fn max_file_bytes_for(&self, rel: &str) -> u64 {
+        self.cfg
+            .mapping_for_path(rel)
+            .map(|m| m.max_file_bytes)
+            .unwrap_or(self.cfg.max_file_bytes)
+    }
+
     /// Record that the daemon just wrote `hash` to `rel_path` on disk (a pull
     /// fast-forward), so the watcher can recognize and skip the filesystem event the
     /// write triggers rather than echoing it straight back to Notion.
@@ -237,7 +247,7 @@ impl Engine {
             }
         };
 
-        if bytes.len() as u64 > self.cfg.max_file_bytes {
+        if bytes.len() as u64 > self.max_file_bytes_for(rel_path) {
             warn!(
                 rel_path,
                 size = bytes.len(),
@@ -721,7 +731,7 @@ impl Engine {
         // text; emit a placeholder instead. classify_text sniffs and decodes in one pass
         // and surfaces residual invalid UTF-8 as binary rather than silently mangling it,
         // preserving the NUL-before-UTF-8 precedence (#18).
-        if bytes.len() as u64 > self.cfg.max_file_bytes {
+        if bytes.len() as u64 > self.max_file_bytes_for(rel_path) {
             return self.ensure_placeholder(rel_path, &bytes, "too large").await;
         }
         let content = match util::classify_text(bytes) {

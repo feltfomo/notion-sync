@@ -115,12 +115,15 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
 
 async fn dispatch(engine: &Arc<Engine>, rel: &str) {
     let abs = engine.abs_path(rel);
-    let result = if !abs.exists() {
-        engine.handle_delete(rel).await
-    } else if abs.is_dir() {
-        engine.ensure_dir(rel).await
-    } else {
-        engine.sync_file(rel).await
+    // symlink_metadata does NOT follow the link, unlike exists()/is_dir(). A `nix build`
+    // drops a `result` symlink to the store path; following it mirrored the whole build
+    // output as a `result` subpage. The reconcile walk already skips symlinks via
+    // file_type(); match that here so the live watcher path agrees.
+    let result = match std::fs::symlink_metadata(&abs) {
+        Err(_) => engine.handle_delete(rel).await, // gone, or a broken link: treat as delete
+        Ok(meta) if meta.file_type().is_symlink() => return,
+        Ok(meta) if meta.is_dir() => engine.ensure_dir(rel).await,
+        Ok(_) => engine.sync_file(rel).await,
     };
     if let Err(e) = result {
         warn!(rel, error = %e, "sync failed");

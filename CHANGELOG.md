@@ -13,6 +13,17 @@ All notable changes to this project are documented here. The format is based on
   can already see many pages). An optional `name` per mapping labels its subtree; it
   defaults to the final path component of `local_root` and must be unique. A legacy
   single `[mapping]` table still parses unchanged.
+- **Per-directory config.** Drop a `.notion-sync.toml` in any mapped directory to extend
+  its `ignore` list (additive on top of the central baseline) and override
+  `max_file_bytes`, without editing the central config. The file travels with the
+  directory, so it can be committed to that repo. Only those two keys are honored;
+  registry/secret keys (`parent_page_id`, `local_root`, `token_file`, ...) are rejected so
+  a mapping can't be repointed from inside its own tree.
+- **`ns config` inspector.** A read-only subcommand that loads the config and prints each
+  mapping's resolved `ignore` list and `max_file_bytes` after per-directory overrides merge
+  in, so you can eyeball what the daemon will actually do before trusting a sync. No Notion
+  calls and no state writes; it just resolves and prints. The token still has to resolve,
+  since loading the config does, so point it at a real `token_file` or set `$NOTION_TOKEN`.
 
 ### Changed
 - **State paths are namespaced per mapping.** Every node/snapshot/journal row is keyed
@@ -24,6 +35,15 @@ All notable changes to this project are documented here. The format is based on
 - **Shared object store.** The content-addressed snapshot store moved from
   `<local_root>/.notion-sync/objects` to `$XDG_STATE_HOME/notion-sync/objects` (beside
   `state.db`), so dedup spans every mapping and no single root owns it.
+
+### Fixed
+- **The watcher no longer follows symlinks.** A `nix build` drops a `result` symlink into
+  the tree; the watcher's `is_dir()` check followed it and mirrored it as a directory
+  subpage. It now stats the link itself and skips symlinks, matching what the reconcile
+  walk already did.
+- **`.notion-sync.toml` and the `.notion-sync/` state dir are always ignored**, regardless
+  of the configured `ignore` list, so a config edit can't drag the daemon's own machinery
+  into Notion.
 
 ### Migration
 - A pre-0.3 `state.db` is migrated **automatically on first start, but only when exactly

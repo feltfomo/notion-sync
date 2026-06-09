@@ -1,6 +1,6 @@
 # notion-sync
 
-A background daemon that keeps a local directory and a Notion page tree in two-way sync.
+A background daemon that keeps one or more local directories and their Notion page trees in two-way sync.
 The local filesystem is the source of truth (local-wins): Notion is a mirror you can read,
 comment on, and lightly edit from anywhere. On a conflict, the file on disk wins.
 
@@ -62,7 +62,7 @@ To check nothing got mangled in transit, download `SHA256SUMS` into the same fol
 With cargo (needs Rust >= 1.74):
 
 ```sh
-cargo install --git https://github.com/feltfomo/notion-sync --tag v0.2.1
+cargo install --git https://github.com/feltfomo/notion-sync --tag v0.3.0
 ```
 
 From a checkout:
@@ -112,6 +112,7 @@ prints which fields to edit, and exits.
    ```sh
    notion-sync                                   # writes config.toml, then exits
    $EDITOR ~/.config/notion-sync/config.toml     # set local_root + parent_page_id
+                                                 # (add more [[mapping]] blocks to mirror more dirs)
    ```
 
 4. **Run the fidelity gate first** (see below) against a scratch page.
@@ -140,10 +141,15 @@ Notion page edited ──(poll every 45s)──────▶  poller ─▶ co
   being trashed and recreated.
 - **Binary or oversized files** get a placeholder page with a warning callout and are never
   written back.
+- **Symlinks are skipped, never followed.** A symlink (like a `nix build` `result`) is left out
+  of the mirror entirely, so build output and external link targets don't leak into Notion.
 - A shared token-bucket rate limiter (~3 req/s) covers the watcher and poller. 429s honor
   `Retry-After`; 409/5xx use exponential backoff with jitter.
 - Startup **reconciliation** adopts existing pages by title rather than recreating them, and
-  refuses to run on a missing or empty local tree so a transient glitch can't wipe the mirror.
+  skips any mapping whose local tree is missing or empty so a transient glitch can't wipe that
+  mapping's mirror (the other mappings keep syncing).
+- **Multiple directories.** Add a `[[mapping]]` block per directory; each has its own
+  `local_root`, `parent_page_id`, and `ignore` list, and one daemon syncs them all.
 
 ## Fidelity gate (run this first)
 
@@ -176,11 +182,44 @@ max_file_bytes     = 5000000
 # Optional. Read only when $NOTION_TOKEN is unset or empty (sops-nix / LoadCredential friendly).
 # token_file = "/run/secrets/notion-token"
 
-[mapping]
+# Repeat [[mapping]] once per directory. An optional `name` (default: the last component
+# of local_root) labels the mapping's subtree in state.db and must be unique. A single
+# legacy `[mapping]` table is still accepted.
+[[mapping]]
+name           = "project"
 local_root     = "/home/you/project"
 parent_page_id = "0123456789abcdef0123456789abcdef"
-ignore         = [".git", "target", "node_modules", "*.lock", ".notion-sync"]
+ignore         = [".git", "target", "node_modules", "*.lock", "result", "dist", ".notion-sync"]
+
+[[mapping]]
+name           = "notes"
+local_root     = "/home/you/notes"
+parent_page_id = "fedcba9876543210fedcba9876543210"
+ignore         = [".git", ".notion-sync"]
 ```
+
+### Per-directory overrides (optional)
+
+The central config is the registry: it's where a mapping's `local_root`, `parent_page_id`, and
+the daemon-wide knobs live, and it can't go away (something has to know which directories exist
+before it can read anything inside them). But per-directory settings like `ignore` don't belong
+in one central list once you're mirroring several trees, so each mapped directory can carry its
+own `.notion-sync.toml` in its root:
+
+```toml
+# /home/you/project/.notion-sync.toml
+ignore         = ["build", "*.tmp"]   # ADDED to the central ignore list, not replacing it
+max_file_bytes = 20000000             # overrides the central cap, this directory only
+```
+
+The file is optional (a directory with none behaves exactly as before), travels with the
+directory so you can commit it to that repo, and honors only those two keys. Anything else
+(`parent_page_id`, `local_root`, `token_file`, ...) is rejected at load, so a mapping can't be
+repointed or have its token swapped from inside its own tree. `ignore` is additive on top of the
+central baseline; `max_file_bytes` is a straight override.
+
+The daemon never mirrors `.notion-sync.toml` or the `.notion-sync/` state dir, whatever your
+`ignore` says.
 
 ## NixOS (flake input + systemd service)
 
@@ -233,8 +272,21 @@ or run `loginctl enable-linger <user>`.
 ## State & limitations
 
 - `state.db` lives under `$XDG_STATE_HOME/notion-sync/` (falls back to
-  `~/.local/state/notion-sync/`).
-- Conflict backups go to `<local_root>/.notion-sync/conflicts/`.
+  `~/.local/state/notion-sync/`). The shared content-addressed snapshot store sits beside
+  it at `$XDG_STATE_HOME/notion-sync/objects/`, so dedup spans every mapping.
+- With multiple mappings, every node/snapshot/journal path is namespaced as
+  `<mapping>/<path>` (the mapping's `name`, defaulting to its `local_root`'s last
+  component). CLI subcommands (`log`, `show`, `restore`, ...) take these `<mapping>/<path>`
+  keys. A `state.db` from before 0.3 is migrated automatically on first start **only** when
+  a single mapping is configured; with several mappings already listed the daemon asks you
+  to run once with the original single mapping first.
+- Conflict backups go to the owning mapping's `<local_root>/.notion-sync/conflicts/`.
+- **Per-directory config.** Each mapped directory can carry a `.notion-sync.toml` in its root
+  that extends its `ignore` (additive) and overrides `max_file_bytes`. It's never mirrored,
+  and neither is the `.notion-sync/` state dir. See
+  [Per-directory overrides](#per-directory-overrides-optional).
+- **Symlinks aren't followed.** A symlink (a `nix build` `result`, say) is skipped, not
+  mirrored, so build output and external link targets stay out of Notion.
 - **Markdown caveat:** edit `.md` files locally, not in Notion's block editor. A file's bytes
   live inside one code block, so a structured edit of a Markdown file (with its own code fences)
   can split the mirror. The daemon detects this and force-pushes local instead, but treat `.md`
@@ -251,7 +303,7 @@ src/
   chunk.rs    positional chunker/reassembler (fidelity-critical)
   language.rs extension -> Notion code-block language
   hashutil.rs blake3 hashing (change + rename detection)
-  config.rs   TOML loader + ignore globs
+  config.rs   TOML loader + ignore globs + per-directory overrides
   state.rs    SQLite state.db
   sync/       engine, watcher, poller, conflict, reconcile, locks, util
   lib.rs      crate root that wires the modules together
