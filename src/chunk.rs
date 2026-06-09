@@ -9,24 +9,24 @@ pub const MAX_ITEMS_PER_BLOCK: usize = 100;
 pub const MAX_CHILDREN_PER_REQUEST: usize = 100;
 
 pub struct EncodedBlock {
-    pub language: String,
+    // &'static because language::for_path returns a static table entry; the only owned
+    // String it ever needs is the one serde hands to CodeReq at serialize time.
+    pub language: &'static str,
     pub segments: Vec<String>,
 }
 
 impl EncodedBlock {
-    pub fn to_json(&self) -> serde_json::Value {
-        let rich: Vec<RichTextReq> = self
-            .segments
-            .iter()
-            .map(|s| RichTextReq::text(s.clone()))
-            .collect();
-        let block = CodeBlockReq::new(self.language.clone(), rich);
+    // Consuming: the body is sent to Notion exactly once, so move the segments into the
+    // request instead of cloning the whole file a second time on the push path.
+    pub fn into_json(self) -> serde_json::Value {
+        let rich: Vec<RichTextReq> = self.segments.into_iter().map(RichTextReq::text).collect();
+        let block = CodeBlockReq::new(self.language.to_string(), rich);
         serde_json::to_value(block).expect("code block serializes")
     }
 }
 
 // Empty files still emit one empty block, so every page has a body block to diff against.
-pub fn encode(content: &str, language: &str) -> Vec<EncodedBlock> {
+pub fn encode(content: &str, language: &'static str) -> Vec<EncodedBlock> {
     let segments = split_into_segments(content);
     let segments = if segments.is_empty() {
         vec![String::new()]
@@ -34,21 +34,43 @@ pub fn encode(content: &str, language: &str) -> Vec<EncodedBlock> {
         segments
     };
 
+    // Group segments into blocks of at most MAX_ITEMS_PER_BLOCK by moving them in;
+    // chunks().to_vec() would clone every segment a second time.
     let mut blocks = Vec::new();
-    for chunk in segments.chunks(MAX_ITEMS_PER_BLOCK) {
+    let mut current = Vec::with_capacity(MAX_ITEMS_PER_BLOCK);
+    for seg in segments {
+        current.push(seg);
+        if current.len() == MAX_ITEMS_PER_BLOCK {
+            blocks.push(EncodedBlock {
+                language,
+                segments: std::mem::take(&mut current),
+            });
+        }
+    }
+    if !current.is_empty() {
         blocks.push(EncodedBlock {
-            language: language.to_string(),
-            segments: chunk.to_vec(),
+            language,
+            segments: current,
         });
     }
     blocks
 }
 
-pub fn batch_blocks(blocks: &[EncodedBlock]) -> Vec<Vec<serde_json::Value>> {
-    blocks
-        .chunks(MAX_CHILDREN_PER_REQUEST)
-        .map(|grp| grp.iter().map(|b| b.to_json()).collect())
-        .collect()
+// Takes the blocks by value: the sole caller drops them right after batching, so moving
+// each into its JSON request avoids cloning the segments yet again.
+pub fn batch_blocks(blocks: Vec<EncodedBlock>) -> Vec<Vec<serde_json::Value>> {
+    let mut batches = Vec::new();
+    let mut current = Vec::with_capacity(MAX_CHILDREN_PER_REQUEST);
+    for block in blocks {
+        current.push(block.into_json());
+        if current.len() == MAX_CHILDREN_PER_REQUEST {
+            batches.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    batches
 }
 
 pub fn reassemble(blocks_plain_text: &[Vec<String>]) -> String {
@@ -133,9 +155,22 @@ mod tests {
         let s = "y".repeat(MAX_CHARS_PER_ITEM * MAX_ITEMS_PER_BLOCK * 101 + 5);
         let blocks = encode(&s, "rust");
         assert_eq!(blocks.len(), 102);
-        let batches = batch_blocks(&blocks);
+        let batches = batch_blocks(encode(&s, "rust"));
         assert_eq!(batches.len(), 2); // 100 + 2
         assert!(batches.iter().all(|b| b.len() <= MAX_CHILDREN_PER_REQUEST));
         assert_eq!(roundtrip(&s), s);
+    }
+
+    #[test]
+    fn empty_file_emits_one_block_through_batching() {
+        // The move-based encode/batch rewrite must preserve the invariant: an empty file
+        // still yields exactly one block carrying a single empty segment, so every page
+        // keeps a body block to diff against.
+        let blocks = encode("", "rust");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].segments, vec![String::new()]);
+        let batches = batch_blocks(encode("", "rust"));
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 1);
     }
 }

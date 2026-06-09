@@ -145,8 +145,7 @@ async fn poll_once(engine: &Arc<Engine>) -> Result<usize, String> {
         if looks_self_authored {
             let is_echo = match engine.read_page_body(&node).await {
                 Ok(body) if body.foreign_blocks == 0 => {
-                    node.content_hash.as_deref()
-                        == Some(hashutil::hash_str(&body.text).as_str())
+                    node.content_hash.as_deref() == Some(hashutil::hash_str(&body.text).as_str())
                 }
                 _ => false,
             };

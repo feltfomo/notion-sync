@@ -23,6 +23,8 @@ if you'd rather not run a script, or want to build it yourself.
 
 ### Option A — one-line installer (easiest)
 
+test
+
 Paste this into a terminal:
 
 ```sh

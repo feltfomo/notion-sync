@@ -47,7 +47,7 @@ async fn run() -> Result<(), String> {
 
     // Encode + append exactly as the daemon would.
     let blocks = chunk::encode(&payload, "rust");
-    for batch in chunk::batch_blocks(&blocks) {
+    for batch in chunk::batch_blocks(blocks) {
         api.append_children(&page.id, batch)
             .await
             .map_err(|e| e.to_string())?;

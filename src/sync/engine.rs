@@ -205,7 +205,12 @@ impl Engine {
             return self.ensure_placeholder(rel_path, &bytes, "binary").await;
         }
 
-        let content = String::from_utf8_lossy(&bytes).to_string();
+        // looks_binary already whole-buffer UTF-8-validated and bailed on failure, so
+        // this is valid UTF-8 in every reachable case; from_utf8 then moves the buffer
+        // into the String instead of allocating a second full-file copy the way
+        // from_utf8_lossy().to_string() did. Surface the residual error like
+        // force_push_locked rather than panic.
+        let content = String::from_utf8(bytes).map_err(|e| e.to_string())?;
         let hash = hashutil::hash_str(&content);
         let mtime_ns = util::file_mtime_ns(&abs);
 
@@ -354,11 +359,12 @@ impl Engine {
         // foreign blocks are intentionally left untouched on a plain push. They are
         // detected on the next pull (read_page_body's foreign_blocks count) and cleaned
         // by the force_push rebuild in resolve_pull, which deletes every child (#19).
-        let old_block_ids = node.body_block_ids.clone();
         let block_ids = self
             .append_body(&node.notion_page_id, content, rel_path)
             .await?;
-        for id in &old_block_ids {
+        // node stays borrowed (it is not cloned into `updated` until below), so walk its
+        // block ids in place instead of cloning them into a throwaway Vec.
+        for id in &node.body_block_ids {
             if let Err(e) = self.api.delete_block(id).await {
                 warn!(rel_path, block = %id, error = %e, "failed to trash old block; continuing");
             }
@@ -400,7 +406,7 @@ impl Engine {
     ) -> anyhow_lite::Result<Vec<String>> {
         let lang = language::for_path(std::path::Path::new(rel_path));
         let blocks = chunk::encode(content, lang);
-        let batches = chunk::batch_blocks(&blocks);
+        let batches = chunk::batch_blocks(blocks);
         let mut ids = Vec::new();
         for batch in batches {
             let mut got = self
