@@ -230,16 +230,17 @@ impl Engine {
             );
             return self.ensure_placeholder(rel_path, &bytes, "too large").await;
         }
-        if util::looks_binary(&bytes) {
-            return self.ensure_placeholder(rel_path, &bytes, "binary").await;
-        }
-
-        // looks_binary already whole-buffer UTF-8-validated and bailed on failure, so
-        // this is valid UTF-8 in every reachable case; from_utf8 then moves the buffer
-        // into the String instead of allocating a second full-file copy the way
-        // from_utf8_lossy().to_string() did. Surface the residual error like
-        // force_push_locked rather than panic.
-        let content = String::from_utf8(bytes).map_err(|e| e.to_string())?;
+        // Sniff and decode in one pass: a NUL in the first 8 KiB means binary (checked
+        // before any UTF-8 scan, preserving the old precedence), otherwise the UTF-8
+        // decode that proves it is text also hands back the String we mirror -- so we
+        // validate UTF-8 once here instead of in looks_binary and again in from_utf8.
+        // The binary arm gets the bytes back for the placeholder.
+        let content = match util::classify_text(bytes) {
+            util::TextOrBinary::Text(text) => text,
+            util::TextOrBinary::Binary(bytes) => {
+                return self.ensure_placeholder(rel_path, &bytes, "binary").await;
+            }
+        };
         let hash = hashutil::hash_str(&content);
         let mtime_ns = util::file_mtime_ns(&abs);
 
@@ -701,16 +702,19 @@ impl Engine {
         let Some(node) = node else { return Ok(()) };
         let abs = self.abs_path(rel_path);
         let bytes = tokio::fs::read(&abs).await.map_err(|e| e.to_string())?;
-        // Mirror sync_file's guards: never lossy-push an oversized or binary file as
-        // corrupted text; emit a placeholder instead. from_utf8 (not _lossy) then
-        // surfaces residual invalid UTF-8 rather than silently mangling it (#18).
+        // Mirror sync_file's guards: never push an oversized or binary file as corrupted
+        // text; emit a placeholder instead. classify_text sniffs and decodes in one pass
+        // and surfaces residual invalid UTF-8 as binary rather than silently mangling it,
+        // preserving the NUL-before-UTF-8 precedence (#18).
         if bytes.len() as u64 > self.cfg.max_file_bytes {
             return self.ensure_placeholder(rel_path, &bytes, "too large").await;
         }
-        if util::looks_binary(&bytes) {
-            return self.ensure_placeholder(rel_path, &bytes, "binary").await;
-        }
-        let content = String::from_utf8(bytes).map_err(|e| e.to_string())?;
+        let content = match util::classify_text(bytes) {
+            util::TextOrBinary::Text(text) => text,
+            util::TextOrBinary::Binary(bytes) => {
+                return self.ensure_placeholder(rel_path, &bytes, "binary").await;
+            }
+        };
         let hash = hashutil::hash_str(&content);
         let mtime_ns = util::file_mtime_ns(&abs);
 

@@ -2,14 +2,28 @@
 
 use std::path::{Path, PathBuf};
 
-/// Heuristic binary detection: a NUL byte in the first 8 KiB, or content that is
-/// not valid UTF-8. v1 mirrors text (UTF-8) only.
-pub fn looks_binary(bytes: &[u8]) -> bool {
+/// The outcome of sniffing a file for the text-mirror path: either decoded UTF-8 text
+/// ready to mirror, or the original bytes handed back for a binary placeholder.
+pub enum TextOrBinary {
+    Text(String),
+    Binary(Vec<u8>),
+}
+
+/// Sniff and decode in a single pass. v1 mirrors text (UTF-8) only, so a file is binary
+/// if it has a NUL byte in the first 8 KiB OR is not valid UTF-8. The NUL check runs
+/// first and short-circuits, preserving the old precedence (a NUL wins before any UTF-8
+/// scan). On the text path the UTF-8 validation that proves it is text also yields the
+/// String, so callers no longer validate UTF-8 a second time with from_utf8; on the
+/// binary path the bytes are returned intact (no copy) for the placeholder.
+pub fn classify_text(bytes: Vec<u8>) -> TextOrBinary {
     let head = &bytes[..bytes.len().min(8192)];
     if head.contains(&0) {
-        return true;
+        return TextOrBinary::Binary(bytes);
     }
-    std::str::from_utf8(bytes).is_err()
+    match String::from_utf8(bytes) {
+        Ok(text) => TextOrBinary::Text(text),
+        Err(e) => TextOrBinary::Binary(e.into_bytes()),
+    }
 }
 
 // temp + fsync + rename: a crash mid-write can't leave a partial file in place.
@@ -127,4 +141,64 @@ pub fn file_mtime_ns(path: &Path) -> Option<i64> {
     let mtime = meta.modified().ok()?;
     let dur = mtime.duration_since(std::time::UNIX_EPOCH).ok()?;
     Some(dur.as_nanos() as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_text, TextOrBinary};
+
+    #[test]
+    fn utf8_text_decodes_to_string() {
+        match classify_text(b"fn main() {}\n".to_vec()) {
+            TextOrBinary::Text(s) => assert_eq!(s, "fn main() {}\n"),
+            TextOrBinary::Binary(_) => panic!("ascii should be text"),
+        }
+        // Multibyte UTF-8 survives intact.
+        match classify_text("café — π".as_bytes().to_vec()) {
+            TextOrBinary::Text(s) => assert_eq!(s, "café — π"),
+            TextOrBinary::Binary(_) => panic!("valid utf-8 should be text"),
+        }
+        // Empty input is empty text, not binary.
+        match classify_text(Vec::new()) {
+            TextOrBinary::Text(s) => assert!(s.is_empty()),
+            TextOrBinary::Binary(_) => panic!("empty should be text"),
+        }
+    }
+
+    #[test]
+    fn nul_in_head_is_binary_even_though_nul_is_valid_utf8() {
+        // A NUL byte is itself valid UTF-8, so this pins the precedence: the NUL check
+        // must win before the UTF-8 scan would accept the buffer as text.
+        let mut bytes = b"some text".to_vec();
+        bytes.push(0);
+        bytes.extend_from_slice(b"more text");
+        let expected = bytes.clone();
+        match classify_text(bytes) {
+            TextOrBinary::Binary(b) => {
+                assert_eq!(b, expected, "bytes returned intact for the placeholder")
+            }
+            TextOrBinary::Text(_) => panic!("NUL in head must classify as binary"),
+        }
+    }
+
+    #[test]
+    fn invalid_utf8_is_binary_and_returns_bytes_intact() {
+        let raw = vec![0xff, 0xfe, 0xfd];
+        match classify_text(raw.clone()) {
+            TextOrBinary::Binary(b) => assert_eq!(b, raw),
+            TextOrBinary::Text(_) => panic!("invalid utf-8 must classify as binary"),
+        }
+    }
+
+    #[test]
+    fn nul_past_the_first_8kib_is_not_treated_as_binary() {
+        // Only the first 8 KiB are sniffed for NUL; a NUL beyond that, in otherwise
+        // valid UTF-8, stays text (NUL is valid UTF-8). Locks the sniff-window size.
+        let mut bytes = vec![b'a'; 8192];
+        bytes.push(0);
+        match classify_text(bytes) {
+            TextOrBinary::Text(s) => assert_eq!(s.len(), 8193),
+            TextOrBinary::Binary(_) => panic!("NUL past the head window should stay text"),
+        }
+    }
 }
