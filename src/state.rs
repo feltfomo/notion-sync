@@ -149,8 +149,9 @@ impl State {
 
     pub fn upsert(&self, node: &Node) -> rusqlite::Result<()> {
         let body = serde_json::to_string(&node.body_block_ids).unwrap_or_else(|_| "[]".into());
-        self.conn.execute(
-            r#"
+        self.conn
+            .prepare_cached(
+                r#"
             INSERT INTO nodes (rel_path, kind, notion_page_id, parent_page_id, content_hash,
                                body_block_ids, local_mtime_ns, notion_last_edited, last_synced_dir,
                                is_binary_placeholder)
@@ -166,7 +167,8 @@ impl State {
               last_synced_dir=excluded.last_synced_dir,
               is_binary_placeholder=excluded.is_binary_placeholder
             "#,
-            params![
+            )?
+            .execute(params![
                 node.rel_path,
                 node.kind.as_str(),
                 node.notion_page_id,
@@ -177,45 +179,41 @@ impl State {
                 node.notion_last_edited,
                 node.last_synced_dir,
                 node.is_binary_placeholder as i64,
-            ],
-        )?;
+            ])?;
         Ok(())
     }
 
     pub fn get_by_path(&self, rel_path: &str) -> rusqlite::Result<Option<Node>> {
         self.conn
-            .query_row(
+            .prepare_cached(
                 "SELECT rel_path, kind, notion_page_id, parent_page_id, content_hash, \
                  body_block_ids, local_mtime_ns, notion_last_edited, last_synced_dir, \
                  is_binary_placeholder FROM nodes WHERE rel_path = ?1",
-                params![rel_path],
-                row_to_node,
-            )
+            )?
+            .query_row(params![rel_path], row_to_node)
             .optional()
     }
 
     /// Find a file node by content hash (powers rename detection).
     pub fn get_by_hash(&self, hash: &str) -> rusqlite::Result<Option<Node>> {
         self.conn
-            .query_row(
+            .prepare_cached(
                 "SELECT rel_path, kind, notion_page_id, parent_page_id, content_hash, \
                  body_block_ids, local_mtime_ns, notion_last_edited, last_synced_dir, \
                  is_binary_placeholder FROM nodes WHERE content_hash = ?1 AND kind = 'file' LIMIT 1",
-                params![hash],
-                row_to_node,
-            )
+            )?
+            .query_row(params![hash], row_to_node)
             .optional()
     }
 
     pub fn get_by_page_id(&self, page_id: &str) -> rusqlite::Result<Option<Node>> {
         self.conn
-            .query_row(
+            .prepare_cached(
                 "SELECT rel_path, kind, notion_page_id, parent_page_id, content_hash, \
                  body_block_ids, local_mtime_ns, notion_last_edited, last_synced_dir, \
                  is_binary_placeholder FROM nodes WHERE notion_page_id = ?1",
-                params![page_id],
-                row_to_node,
-            )
+            )?
+            .query_row(params![page_id], row_to_node)
             .optional()
     }
 
@@ -556,6 +554,25 @@ mod tests {
         let got = st.get_by_path("src/main.rs").unwrap().unwrap();
         assert_eq!(got.notion_page_id, "page-src/main.rs");
         assert_eq!(got.body_block_ids, vec!["b1", "b2"]);
+    }
+
+    #[test]
+    fn tracked_files_excludes_dirs_and_binary_placeholders() {
+        // poll_once iterates tracked_files() and no longer filters in the loop, so this
+        // SQL predicate is the only thing keeping dirs and binary placeholders out of
+        // the poll. Lock it down.
+        let st = State::open_in_memory().unwrap();
+        st.upsert(&sample("src/main.rs", "h1")).unwrap();
+        let mut dir = sample("src", "h2");
+        dir.kind = NodeKind::Dir;
+        st.upsert(&dir).unwrap();
+        let mut placeholder = sample("assets/logo.png", "h3");
+        placeholder.is_binary_placeholder = true;
+        st.upsert(&placeholder).unwrap();
+
+        let tracked = st.tracked_files().unwrap();
+        assert_eq!(tracked.len(), 1);
+        assert_eq!(tracked[0].rel_path, "src/main.rs");
     }
 
     #[test]

@@ -72,7 +72,7 @@ async fn poll_once(engine: &Arc<Engine>) -> Result<usize, String> {
             .state
             .lock()
             .await
-            .all_tracked()
+            .tracked_files()
             .map_err(|e| e.to_string())?
     };
 
@@ -89,10 +89,6 @@ async fn poll_once(engine: &Arc<Engine>) -> Result<usize, String> {
 
     let mut changed = 0usize;
     for node in nodes {
-        if node.kind != crate::state::NodeKind::File || node.is_binary_placeholder {
-            continue;
-        }
-
         // Fast path: search already reported this page's last-edit time and it matches
         // what we last synced -> nothing to do, no GET required.
         if let Some(ts) = recent.get(&node.notion_page_id) {
