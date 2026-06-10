@@ -40,6 +40,17 @@ flate2 = "1"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Webhook receiver: a minimal hyper 1.x HTTP listener for Notion integration webhooks.
+# hyper / hyper-util / http-body-util are already in the tree via reqwest 0.12; promoting
+# them to direct deps just makes the server side explicit.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+# HMAC-SHA256 over the raw body to verify the X-Notion-Signature header. Pure-Rust
+# RustCrypto crates, kept independent of reqwest's TLS backend on purpose: signature
+# verification must not break if the rustls backend (ring vs aws-lc-rs) flips on a bump.
+hmac = "0.12"
+sha2 = "0.10"
 
 [dev-dependencies]
 # Dev-only; does not ship in the daemon binary.

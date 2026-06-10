@@ -16,7 +16,7 @@ use notion_sync::api::{NotionClient, RateLimiter};
 use notion_sync::cli::{resolve_ansi, Cli, ColorWhen, Command, LogTime};
 use notion_sync::config::Config;
 use notion_sync::state::State;
-use notion_sync::sync::{poller, reconcile, watcher, Engine};
+use notion_sync::sync::{poller, reconcile, watcher, webhook, Engine};
 
 #[tokio::main]
 async fn main() {
@@ -202,8 +202,18 @@ async fn run_daemon(config_path: &Path) -> Result<(), String> {
         let rx = shutdown_rx.clone();
         tokio::spawn(async move { poller::run(engine, rx).await })
     };
+    // Optional third task: the webhook receiver, only when [webhook] enabled = true. In
+    // this phase it needs just the resolved settings, not the engine -- it receives,
+    // verifies, and logs; dispatching events into the engine comes in a later phase.
+    let webhook_task = engine.cfg.webhook.clone().map(|wcfg| {
+        let rx = shutdown_rx.clone();
+        tokio::spawn(async move { webhook::run(wcfg, rx).await })
+    });
 
     let _ = tokio::join!(watcher_task, poller_task);
+    if let Some(task) = webhook_task {
+        let _ = task.await;
+    }
     info!("shutdown complete");
     Ok(())
 }

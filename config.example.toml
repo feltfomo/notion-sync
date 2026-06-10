@@ -22,6 +22,27 @@ max_file_bytes = 5000000
 # unset or empty (sops-nix / systemd LoadCredential friendly).
 # token_file = "/run/secrets/notion-token"
 
+# Optional webhook receiver (Notion -> local push). Disabled by default; when off, the
+# daemon polls exactly as before. When on, it also runs a small HTTP listener that an
+# integration webhook posts to, so remote edits land in seconds instead of waiting for
+# the next poll. The poller stays on as the fallback for missed/at-most-once deliveries.
+#
+# The listener binds loopback on purpose: terminate TLS in a tunnel (e.g. cloudflared)
+# and forward to this port. Notion only delivers to public HTTPS, never localhost.
+#
+# The signing secret (Notion's verification_token) is NOT set here. On first connect
+# Notion posts the token once; the daemon logs and persists it under
+# $XDG_STATE_HOME/notion-sync/webhook_secret, and you paste it into the integration's
+# Webhooks tab to verify. To pin it explicitly instead, set $NOTION_WEBHOOK_SECRET or
+# point secret_file at a file (sops-nix / systemd LoadCredential friendly).
+# [webhook]
+# enabled = false
+# bind = "127.0.0.1"
+# port = 8080
+# path = "/notion-webhook"
+# secret_file = "/run/secrets/notion-webhook-secret"
+# fallback_poll_secs = 900
+
 # One or more directory mappings. Repeat the [[mapping]] table once per directory you
 # want to mirror; a single integration token can hold access to every parent page.
 # (A single legacy `[mapping]` table -- without the double brackets -- is also still

@@ -24,6 +24,10 @@ pub struct RawConfig {
     /// One or many mappings. TOML accepts either a single `[mapping]` table or repeated
     /// `[[mapping]]` tables; untagged, so the table-vs-sequence shape picks the variant.
     pub mapping: RawMappings,
+    /// Optional `[webhook]` table. Absent means the receiver never starts: the daemon
+    /// polls exactly as it did before webhooks existed.
+    #[serde(default)]
+    pub webhook: RawWebhook,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,6 +49,43 @@ pub struct RawMapping {
     pub parent_page_id: String,
     #[serde(default)]
     pub ignore: Vec<String>,
+}
+
+/// The optional `[webhook]` table. Struct-level `#[serde(default)]` makes every key
+/// optional (falling back to `Default`), so an empty table -- or none at all -- is valid
+/// and `enabled = false` is the resting state. `deny_unknown_fields` turns a typo like
+/// `secrets_file` into a loud parse error instead of a silently ignored key.
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RawWebhook {
+    /// Off by default; the receiver only binds when this is true.
+    pub enabled: bool,
+    /// Loopback by default: the intended deployment terminates TLS in a tunnel
+    /// (cloudflared) and forwards here, so there's no reason to bind a public interface.
+    pub bind: String,
+    pub port: u16,
+    /// The single path the receiver answers on; anything else 404s.
+    pub path: String,
+    /// Optional file holding the signing secret (Notion's verification_token). Read only
+    /// when $NOTION_WEBHOOK_SECRET is unset. Absent is fine: the one-time handshake
+    /// delivers the token and the receiver persists it under the state dir.
+    pub secret_file: Option<PathBuf>,
+    /// Phase 4 knob, parsed now so the schema is stable: how slow the poller may run when
+    /// webhook pushes are covering the common case.
+    pub fallback_poll_secs: u64,
+}
+
+impl Default for RawWebhook {
+    fn default() -> Self {
+        RawWebhook {
+            enabled: false,
+            bind: "127.0.0.1".to_string(),
+            port: 8080,
+            path: "/notion-webhook".to_string(),
+            secret_file: None,
+            fallback_poll_secs: 900,
+        }
+    }
 }
 
 /// The optional per-directory override file (`<local_root>/.notion-sync.toml`). Only
@@ -92,6 +133,25 @@ pub struct Mapping {
     pub max_file_bytes: u64,
 }
 
+/// Resolved webhook settings. `Some` only when `[webhook] enabled = true`; `None` is the
+/// poller-only resting state, so an existing config without a `[webhook]` table behaves
+/// exactly as before.
+#[derive(Debug, Clone)]
+pub struct Webhook {
+    pub bind: String,
+    pub port: u16,
+    pub path: String,
+    pub fallback_poll_secs: u64,
+    /// Signing secret (the verification_token), resolved at load from
+    /// $NOTION_WEBHOOK_SECRET or `secret_file`. `None` means we haven't been handed one
+    /// yet; the receiver accepts the one-time handshake, persists the token to
+    /// `secret_store_path`, and verifies every event after that.
+    pub secret: Option<String>,
+    /// Where a handshake-delivered token is persisted so it survives a restart
+    /// ($XDG_STATE_HOME/notion-sync/webhook_secret, beside state.db and the object store).
+    pub secret_store_path: PathBuf,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub notion_version: String,
@@ -105,6 +165,8 @@ pub struct Config {
     /// Where the token came from, retained so the daemon can re-read it on a 401
     /// without a restart.
     pub token_file: Option<PathBuf>,
+    /// Webhook receiver settings, or `None` when `[webhook]` is absent or disabled.
+    pub webhook: Option<Webhook>,
 }
 
 impl Config {
@@ -211,6 +273,7 @@ impl Config {
         }
 
         let token = load_token(raw.token_file.as_deref())?;
+        let webhook = resolve_webhook(raw.webhook)?;
 
         Ok(Config {
             notion_version: raw.notion_version,
@@ -220,6 +283,7 @@ impl Config {
             mappings,
             token,
             token_file: raw.token_file,
+            webhook,
         })
     }
 }
@@ -311,6 +375,95 @@ fn glob_match(pattern: &str, name: &str) -> bool {
         return name.starts_with(prefix);
     }
     pattern == name
+}
+
+/// Turn the raw `[webhook]` table into resolved settings, or `None` when disabled.
+///
+/// Strict on shape (bind must be an IP, port and path must be sane) but deliberately
+/// lenient on the secret: an enabled receiver with no secret yet is a valid state,
+/// because Notion's one-time handshake is what delivers the signing token. The receiver
+/// accepts that single unsigned handshake, persists the token, and verifies everything
+/// afterward.
+fn resolve_webhook(raw: RawWebhook) -> Result<Option<Webhook>, ConfigError> {
+    if !raw.enabled {
+        return Ok(None);
+    }
+    if raw.bind.parse::<std::net::IpAddr>().is_err() {
+        return Err(ConfigError::Invalid(format!(
+            "webhook.bind must be an IP address (e.g. \"127.0.0.1\"), got {:?}",
+            raw.bind
+        )));
+    }
+    if raw.port == 0 {
+        return Err(ConfigError::Invalid("webhook.port must be non-zero".into()));
+    }
+    if !raw.path.starts_with('/') {
+        return Err(ConfigError::Invalid(format!(
+            "webhook.path must start with '/', got {:?}",
+            raw.path
+        )));
+    }
+    if raw.fallback_poll_secs == 0 {
+        return Err(ConfigError::Invalid(
+            "webhook.fallback_poll_secs must be > 0".into(),
+        ));
+    }
+    let secret = load_webhook_secret(raw.secret_file.as_deref())?;
+    Ok(Some(Webhook {
+        bind: raw.bind,
+        port: raw.port,
+        path: raw.path,
+        fallback_poll_secs: raw.fallback_poll_secs,
+        secret,
+        secret_store_path: default_webhook_secret_path(),
+    }))
+}
+
+/// Resolve the webhook signing secret without erroring when it simply isn't set yet.
+/// Precedence: $NOTION_WEBHOOK_SECRET, then `secret_file`. A configured-but-unreadable or
+/// empty `secret_file` IS an error (a typo'd path must not silently fall back to an
+/// unverified endpoint); an unset secret returns `None` so the handshake can bootstrap.
+fn load_webhook_secret(
+    secret_file: Option<&std::path::Path>,
+) -> Result<Option<String>, ConfigError> {
+    if let Ok(s) = std::env::var("NOTION_WEBHOOK_SECRET") {
+        if !s.trim().is_empty() {
+            return Ok(Some(s.trim().to_string()));
+        }
+    }
+    if let Some(path) = secret_file {
+        let s = std::fs::read_to_string(path).map_err(|e| {
+            ConfigError::Invalid(format!(
+                "webhook.secret_file {} could not be read: {e}",
+                path.display()
+            ))
+        })?;
+        let s = s.trim().to_string();
+        if s.is_empty() {
+            return Err(ConfigError::Invalid(format!(
+                "webhook.secret_file {} is empty",
+                path.display()
+            )));
+        }
+        return Ok(Some(s));
+    }
+    Ok(None)
+}
+
+/// $XDG_STATE_HOME/notion-sync/webhook_secret (falling back to ~/.local/state), beside
+/// state.db and the object store. Mirrors the resolution in state.rs/snapshot.rs; kept
+/// local rather than shared because those module helpers are private and this is just a
+/// different leaf under the same well-known dir.
+fn default_webhook_secret_path() -> PathBuf {
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            home.join(".local/state")
+        });
+    base.join("notion-sync").join("webhook_secret")
 }
 
 /// Resolve the Notion integration token. Precedence: $NOTION_TOKEN, then the optional
@@ -503,9 +656,82 @@ mod tests {
             ],
             token: "t".into(),
             token_file: None,
+            webhook: None,
         };
         assert_eq!(cfg.mapping_for_path("docs/readme.md").unwrap().name, "docs");
         assert_eq!(cfg.mapping_for_path("app/src/main.rs").unwrap().name, "app");
         assert!(cfg.mapping_for_path("unknown/x").is_none());
+    }
+
+    #[test]
+    fn webhook_absent_resolves_to_none() {
+        // No [webhook] table at all: the field defaults in and resolve() yields None
+        // (poller-only), so every pre-webhook config keeps working untouched.
+        let raw: RawConfig =
+            toml::from_str("[[mapping]]\nlocal_root = \"/tmp\"\nparent_page_id = \"p\"\n").unwrap();
+        assert!(!raw.webhook.enabled);
+        assert!(resolve_webhook(raw.webhook).unwrap().is_none());
+    }
+
+    #[test]
+    fn webhook_enabled_resolves_with_defaults() {
+        // Bare `enabled = true` is enough; the rest come from RawWebhook::default().
+        let raw: RawWebhook = toml::from_str("enabled = true").unwrap();
+        let w = resolve_webhook(raw).unwrap().expect("enabled => Some");
+        assert_eq!(w.bind, "127.0.0.1");
+        assert_eq!(w.port, 8080);
+        assert_eq!(w.path, "/notion-webhook");
+        assert_eq!(w.fallback_poll_secs, 900);
+        assert!(w.secret_store_path.ends_with("notion-sync/webhook_secret"));
+    }
+
+    #[test]
+    fn webhook_rejects_bad_bind_port_and_path() {
+        let bad_bind = RawWebhook {
+            enabled: true,
+            bind: "not-an-ip".into(),
+            ..RawWebhook::default()
+        };
+        assert!(resolve_webhook(bad_bind).is_err());
+
+        let bad_port = RawWebhook {
+            enabled: true,
+            port: 0,
+            ..RawWebhook::default()
+        };
+        assert!(resolve_webhook(bad_port).is_err());
+
+        let bad_path = RawWebhook {
+            enabled: true,
+            path: "notion-webhook".into(),
+            ..RawWebhook::default()
+        };
+        assert!(resolve_webhook(bad_path).is_err());
+    }
+
+    #[test]
+    fn webhook_secret_file_is_read_trimmed_and_empty_is_an_error() {
+        let dir = std::env::temp_dir().join(format!(
+            "notion-sync-wh-secret-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secret");
+
+        std::fs::write(&path, "  sek_123\n").unwrap();
+        assert_eq!(
+            load_webhook_secret(Some(&path)).unwrap().as_deref(),
+            Some("sek_123")
+        );
+
+        // A configured-but-empty secret file is a hard error, not a silent None.
+        std::fs::write(&path, "   \n").unwrap();
+        assert!(load_webhook_secret(Some(&path)).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
