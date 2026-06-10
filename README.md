@@ -180,17 +180,34 @@ path               = "/notion-webhook"
 fallback_poll_secs = 900
 ```
 
-Notion only delivers to a public HTTPS URL, never to localhost, so the receiver binds loopback and expects something in front to terminate TLS and forward to it. A tunnel is the easy route:
+Notion only delivers to a public HTTPS URL, never to localhost, so the receiver binds loopback and expects something in front to terminate TLS and forward to it.
 
-```sh
-cloudflared tunnel --url http://127.0.0.1:8080
-```
-
-Then, in the integration's **Webhooks** tab, point a subscription at `https://<your-tunnel>/notion-webhook`. On first connect Notion posts a one-time `verification_token`; the daemon logs it and persists it under `$XDG_STATE_HOME/notion-sync/webhook_secret`, and you paste it back into that tab to verify. After that every event is checked (HMAC-SHA256 over the raw body), and the secret survives restarts, so you only verify once.
+On first connect Notion posts a one-time `verification_token`; the daemon logs it and persists it under `$XDG_STATE_HOME/notion-sync/webhook_secret`, and you paste it back into the integration's **Webhooks** tab to verify. After that every event is checked (HMAC-SHA256 over the raw body), and the secret survives restarts, so you only verify once.
 
 To pin the secret yourself instead of relying on the persisted handshake, set `$NOTION_WEBHOOK_SECRET` or point `secret_file` at a file (sops-nix / systemd `LoadCredential` friendly).
 
-A quick `cloudflared tunnel --url` hands out a new random hostname each run — fine for testing, useless once verified, since Notion fixes the URL at verify time. For a real deployment use a named tunnel with a stable hostname.
+### Picking a tunnel
+
+Notion pins the URL at verify time and auto-pauses a subscription that racks up errors, so the tunnel choice matters more than it looks: you want a **stable hostname** in front of a receiver that's **reliably up**. A hostname that changes out from under you is the fastest way to get paused.
+
+- **`cloudflared tunnel --url` (quick tunnel)** — zero setup, but a new random `*.trycloudflare.com` hostname every run. Fine for a smoke test, useless once verified: the next restart strands Notion on a dead URL and the subscription pauses.
+
+  ```sh
+  cloudflared tunnel --url http://127.0.0.1:8080
+  ```
+
+- **Named Cloudflare tunnel** — stable hostname, but needs a Cloudflare account with a *zone* (a domain you've delegated to Cloudflare). No domain, no named tunnel.
+- **Tailscale Funnel** — a stable public HTTPS hostname (`https://<host>.<tailnet>.ts.net/`) with no domain and no paid plan. If you already run Tailscale, it's the least-effort stable option:
+
+  ```sh
+  # one-time: enable HTTPS certs + Funnel for the tailnet in the admin console.
+  # --bg persists the serve config across reboots.
+  tailscale funnel --bg 8080
+  ```
+
+  The hostname is bound to the node, so it survives restarts and reboots — which is the whole point. Verify the subscription once against `https://<host>.<tailnet>.ts.net/notion-webhook` and you're done.
+
+Whatever you pick, point the subscription at `https://<your-tunnel>/notion-webhook`. And mind the one failure mode that bit me: a tunnel only forwards from the edge to the node — it can't answer for a daemon that isn't running. A stopped daemon shows up as a `502` to Notion, and enough of those pause the subscription. Since this is a user service, keep it alive across logout with lingering (`loginctl enable-linger <user>`, or `users.users.<name>.linger = true;` on NixOS). If it does get paused, just resume — the poller has been covering the gap the whole time, so nothing is lost.
 
 ## NixOS / home-manager
 
@@ -249,9 +266,9 @@ Then `nixos-rebuild switch`. Update with `nix flake update notion-sync`.
 
 The home-manager and hjem modules add `perDirectory.<path>` for per-tree `.notion-sync.toml` overrides, keyed relative to `$HOME`. Set exactly one of `settings` or `configFile` (the module asserts it).
 
-It runs as a user service and restarts on failure. On a headless box, enable lingering: `users.users.<name>.linger = true;` or `loginctl enable-linger <user>`.
+It runs as a user service and restarts on failure. On a headless box, enable lingering: `users.users.<name>.linger = true;` or `loginctl enable-linger <user>`. This matters most with webhooks on — a daemon that's down during a delivery returns errors Notion counts toward an auto-pause.
 
-For webhooks under Nix, put the `[webhook]` table in `settings.webhook` and supply the signing secret via `environmentFile` (`NOTION_WEBHOOK_SECRET=...`) or let the one-time handshake persist it. The public-HTTPS tunnel (e.g. a `services.cloudflared` named tunnel) is deployed separately.
+For webhooks under Nix, put the `[webhook]` table in `settings.webhook` and supply the signing secret via `environmentFile` (`NOTION_WEBHOOK_SECRET=...`) or let the one-time handshake persist it. The public-HTTPS tunnel is deployed separately — a `services.cloudflared` named tunnel, or Tailscale Funnel (`services.tailscale` + `tailscale funnel --bg 8080`); see [Picking a tunnel](#picking-a-tunnel).
 
 ## State & limitations
 
