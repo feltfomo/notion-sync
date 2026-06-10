@@ -202,12 +202,14 @@ async fn run_daemon(config_path: &Path) -> Result<(), String> {
         let rx = shutdown_rx.clone();
         tokio::spawn(async move { poller::run(engine, rx).await })
     };
-    // Optional third task: the webhook receiver, only when [webhook] enabled = true. In
-    // this phase it needs just the resolved settings, not the engine -- it receives,
-    // verifies, and logs; dispatching events into the engine comes in a later phase.
+    // Optional third task: the webhook receiver, only when [webhook] enabled = true. It
+    // gets a clone of the engine so a verified event dispatches straight into the same
+    // pull/delete paths the poller uses; the poller stays the fallback when delivery is
+    // dropped, out of order, or aggregated.
     let webhook_task = engine.cfg.webhook.clone().map(|wcfg| {
+        let engine = engine.clone();
         let rx = shutdown_rx.clone();
-        tokio::spawn(async move { webhook::run(wcfg, rx).await })
+        tokio::spawn(async move { webhook::run(engine, wcfg, rx).await })
     });
 
     let _ = tokio::join!(watcher_task, poller_task);

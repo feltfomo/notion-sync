@@ -1,4 +1,6 @@
-//! Integration-webhook receiver. Phase 1: receive, verify, log. No engine dispatch yet.
+//! Integration-webhook receiver: receive, verify (HMAC-SHA256), then dispatch into the
+//! engine -- a content update pulls the page to disk, a delete mirrors the trash locally.
+//! The poller stays the catch-all fallback for anything this doesn't handle.
 //!
 //! Notion only delivers to public HTTPS, so the intended deployment terminates TLS in a
 //! tunnel (cloudflared) and forwards to this loopback listener. Delivery is at-most-once
@@ -28,6 +30,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{watch, RwLock};
 use tracing::{debug, error, info, warn};
 
+use super::engine::Engine;
 use crate::config::Webhook;
 
 /// Shared receiver state. The signing secret can change at runtime (the handshake
@@ -36,9 +39,13 @@ struct Receiver {
     path: String,
     secret: RwLock<Option<String>>,
     secret_store_path: PathBuf,
+    /// The sync engine, so a verified event can be dispatched straight into the same
+    /// pull/delete paths the poller uses. Per-path locks inside the engine serialize a
+    /// webhook-driven pull against a concurrent poll of the same node.
+    engine: Arc<Engine>,
 }
 
-pub async fn run(cfg: Webhook, mut shutdown: watch::Receiver<bool>) {
+pub async fn run(engine: Arc<Engine>, cfg: Webhook, mut shutdown: watch::Receiver<bool>) {
     let addr: SocketAddr = match format!("{}:{}", cfg.bind, cfg.port).parse() {
         Ok(a) => a,
         Err(e) => {
@@ -74,9 +81,10 @@ pub async fn run(cfg: Webhook, mut shutdown: watch::Receiver<bool>) {
         path: cfg.path.clone(),
         secret: RwLock::new(secret),
         secret_store_path: cfg.secret_store_path.clone(),
+        engine,
     });
 
-    info!(addr = %addr, path = %cfg.path, "webhook receiver listening (receive/verify/log only)");
+    info!(addr = %addr, path = %cfg.path, "webhook receiver listening");
 
     loop {
         tokio::select! {
@@ -158,21 +166,94 @@ async fn handle(recv: Arc<Receiver>, req: Request<Incoming>) -> Response<Full<By
         return text(StatusCode::UNAUTHORIZED, "bad signature");
     }
 
-    // Phase 1 stops here: log the event and 200. Engine dispatch is a later phase.
+    // Ack fast, then dispatch. Notion's delivery is best-effort with a tight ack window
+    // and retries, so a slow pull (network I/O) must never hold the response open and
+    // trigger a redelivery. Parse + verify cost is trivial and stays inline; the actual
+    // pull/delete is handed to a task so we can 200 right away. Per-path locks in the
+    // engine serialize that task against a concurrent poll of the same node.
     match serde_json::from_slice::<WebhookEvent>(&raw) {
         Ok(ev) => {
-            let authors: Vec<&str> = ev.authors.iter().map(|a| a.id.as_str()).collect();
-            info!(
-                ty = %ev.ty,
-                entity = %ev.entity.id,
-                entity_type = %ev.entity.ty,
-                ?authors,
-                "webhook event verified (logging only)"
-            );
+            let engine = recv.engine.clone();
+            tokio::spawn(async move { dispatch(&engine, &ev).await });
         }
         Err(e) => warn!(error = %e, "verified webhook but could not parse its event body"),
     }
     text(StatusCode::OK, "ok")
+}
+
+/// What a verified event asks us to do locally. A separate, pure mapping so the routing
+/// is unit-testable without standing up an Engine, and so an unrecognized event type
+/// falls through to `Ignore` (the poller catches it) instead of a blind pull.
+#[derive(Clone, Copy)]
+enum Action {
+    Pull,
+    Delete,
+    Ignore,
+}
+
+/// Map an event type to a local action. Deliberately conservative: only the two shapes
+/// we know how to act on map to work; everything else (moves, property-only edits,
+/// undeletes, comments, database/data_source events) is left to the poller for now.
+fn action_for(event_type: &str) -> Action {
+    match event_type {
+        "page.content_updated" => Action::Pull,
+        "page.deleted" => Action::Delete,
+        _ => Action::Ignore,
+    }
+}
+
+/// True only if there is at least one author and every author is our own bot. Notion
+/// aggregates events, so `authors` can list several people; a single human co-author in
+/// the window means a real edit we must not treat as our own echo.
+fn authored_only_by(authors: &[Author], bot_user_id: &str) -> bool {
+    !authors.is_empty() && authors.iter().all(|a| a.id == bot_user_id)
+}
+
+/// Apply a verified event to the local mirror, reusing the engine's existing pull/delete
+/// paths. The entity id from the payload is matched against tracked pages; an unmatched
+/// id is an untracked page (remote-first discovery is a later phase), so we leave it to
+/// the poller rather than guessing.
+async fn dispatch(engine: &Engine, ev: &WebhookEvent) {
+    let action = action_for(&ev.ty);
+    if matches!(action, Action::Ignore) {
+        debug!(ty = %ev.ty, entity = %ev.entity.id, "webhook event needs no local action; poller remains the catch-all");
+        return;
+    }
+
+    let node = {
+        let st = engine.state.lock().await;
+        st.get_by_page_id(&ev.entity.id).ok().flatten()
+    };
+    let Some(node) = node else {
+        debug!(ty = %ev.ty, entity = %ev.entity.id, entity_type = %ev.entity.ty, "webhook event for an untracked page; ignoring (remote discovery is a later phase)");
+        return;
+    };
+
+    match action {
+        Action::Delete => {
+            info!(rel_path = %node.rel_path, "webhook: remote page trashed; applying remote delete locally");
+            if let Err(e) = engine.handle_remote_delete(&node).await {
+                warn!(rel_path = %node.rel_path, error = %e, "webhook-driven remote delete failed");
+            }
+        }
+        Action::Pull => {
+            // Same echo rule as the poller (engine::remote_body_matches_last_sync is the
+            // shared half): an edit attributed solely to our bot whose remote body still
+            // hashes to what we last synced is our own push coming back -- skip it. A human
+            // co-author, or a body that has actually diverged, is a real edit to pull.
+            if authored_only_by(&ev.authors, &engine.bot_user_id)
+                && engine.remote_body_matches_last_sync(&node).await
+            {
+                debug!(rel_path = %node.rel_path, "webhook: skipping self-authored echo (content matches last sync)");
+                return;
+            }
+            info!(rel_path = %node.rel_path, "webhook: external Notion edit; pulling");
+            if let Err(e) = engine.pull_page(&node).await {
+                warn!(rel_path = %node.rel_path, error = %e, "webhook-driven pull failed");
+            }
+        }
+        Action::Ignore => {}
+    }
 }
 
 /// Constant-time HMAC-SHA256 check of the `sha256=<hex>` signature over the raw body.
@@ -350,5 +431,37 @@ mod tests {
         assert!(load_persisted_secret(&path).is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn action_routing_handles_pull_delete_and_falls_through_to_ignore() {
+        assert!(matches!(action_for("page.content_updated"), Action::Pull));
+        assert!(matches!(action_for("page.deleted"), Action::Delete));
+        // Anything we don't explicitly act on stays with the poller -- never a blind pull.
+        assert!(matches!(action_for("page.undeleted"), Action::Ignore));
+        assert!(matches!(action_for("page.moved"), Action::Ignore));
+        assert!(matches!(action_for("comment.created"), Action::Ignore));
+        assert!(matches!(action_for(""), Action::Ignore));
+    }
+
+    #[test]
+    fn self_author_check_requires_every_author_to_be_the_bot() {
+        let bot = "bot-user-1";
+        let only_us = [Author {
+            id: "bot-user-1".into(),
+        }];
+        let with_human = [
+            Author {
+                id: "bot-user-1".into(),
+            },
+            Author {
+                id: "human-9".into(),
+            },
+        ];
+        assert!(authored_only_by(&only_us, bot));
+        // A human co-author in the same aggregation window is a real edit: don't skip it.
+        assert!(!authored_only_by(&with_human, bot));
+        // No authors at all is not a self-edit; fall through to verify/pull.
+        assert!(!authored_only_by(&[], bot));
     }
 }
