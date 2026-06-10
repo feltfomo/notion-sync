@@ -37,6 +37,17 @@ All notable changes to this project are documented here. The format is based on
   to un-placeable and was silently dropped. Page ids are now normalized (dashes stripped,
   lowercased) before matching a mapping root.
 
+## [0.5.1] - 2026-06-10
+
+### Added
+- **Wider code-block language detection.** The extension-to-language map now covers most of
+  what Notion can highlight (Clojure, Elixir, Elm, Erlang, F#, Fortran, GLSL, Groovy, HCL,
+  Julia, Scala, Scheme, Solidity, Protobuf, and ~30 more) instead of falling back to plain
+  text, with targets matching Notion's exact picker values. Shared extensions follow GitHub
+  Linguist's default: `.m` is Objective-C, `.v` is Verilog, `.pl` stays Perl (Prolog is
+  `.pro`). Languages with no real source extension (ASCII Art, BNF, EBNF, Markup, Notion
+  Formula) stay manual.
+
 ## [0.4.0] - 2026-06-09
 
 ### Added
@@ -194,6 +205,7 @@ All notable changes to this project are documented here. The format is based on
 - Initial one-way mirror (local -> Notion) with watcher, poller, reconcile, local-wins
   conflict handling, and the chunk fidelity probe.
 
+[0.5.1]: https://github.com/feltfomo/notion-sync/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/feltfomo/notion-sync/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/feltfomo/notion-sync/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/feltfomo/notion-sync/compare/v0.2.1...v0.3.0

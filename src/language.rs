@@ -6,30 +6,32 @@ use std::path::Path;
 fn lang_for_ext(ext: &str) -> Option<&'static str> {
     Some(match ext {
         "rs" => "rust",
-        "py" => "python",
-        "ts" => "typescript",
+        "py" | "pyw" | "pyi" => "python",
+        "ts" | "mts" | "cts" => "typescript",
         "tsx" => "typescript",
         "js" | "mjs" | "cjs" => "javascript",
         "jsx" => "javascript",
         "go" => "go",
         "c" | "h" => "c",
-        "cc" | "cpp" | "cxx" | "hpp" | "hxx" => "c++",
+        "cc" | "cpp" | "cxx" | "hpp" | "hxx" | "hh" => "c++",
         "cs" => "c#",
         "java" => "java",
         "kt" | "kts" => "kotlin",
         "swift" => "swift",
         "rb" => "ruby",
         "php" => "php",
-        "scala" => "scala",
+        "scala" | "sc" => "scala",
         "hs" => "haskell",
         "lua" => "lua",
         "r" => "r",
         "dart" => "dart",
-        "sh" | "bash" => "shell",
+        "sh" | "bash" | "zsh" => "shell",
         "sql" => "sql",
         "html" | "htm" => "html",
         "css" => "css",
-        "scss" | "sass" => "scss",
+        "scss" => "scss",
+        "sass" => "sass",
+        "less" => "less",
         "json" => "json",
         "yaml" | "yml" => "yaml",
         "toml" => "toml",
@@ -42,7 +44,49 @@ fn lang_for_ext(ext: &str) -> Option<&'static str> {
         "tex" => "latex",
         "ml" | "mli" => "ocaml",
         "pl" | "pm" => "perl",
-        "ps1" => "powershell",
+        "ps1" | "psm1" | "psd1" => "powershell",
+        "abap" => "abap",
+        "agda" => "agda",
+        "ino" => "arduino",
+        "asm" | "s" => "assembly",
+        "bas" => "basic",
+        "clj" | "cljs" | "cljc" | "edn" => "clojure",
+        "coffee" => "coffeescript",
+        "dhall" => "dhall",
+        "diff" | "patch" => "diff",
+        "ex" | "exs" => "elixir",
+        "elm" => "elm",
+        "erl" | "hrl" => "erlang",
+        "fs" | "fsi" | "fsx" => "f#",
+        "f" | "for" | "f90" | "f95" | "f03" => "fortran",
+        "feature" => "gherkin",
+        "glsl" | "vert" | "frag" | "comp" => "glsl",
+        "groovy" | "gradle" => "groovy",
+        "hcl" | "tf" | "tfvars" => "hcl",
+        "idr" => "idris",
+        "jl" => "julia",
+        "lisp" | "lsp" | "el" => "lisp",
+        "ls" => "livescript",
+        "ll" => "llvm ir",
+        "nb" | "wl" | "wls" => "mathematica",
+        "mm" => "objective-c",
+        "mmd" => "mermaid",
+        "pas" | "pp" => "pascal",
+        "pro" => "prolog",
+        "proto" => "protobuf",
+        "purs" => "purescript",
+        "rkt" => "racket",
+        "re" | "rei" => "reason",
+        "scm" | "ss" => "scheme",
+        "sol" => "solidity",
+        "st" => "smalltalk",
+        "sv" | "svh" => "verilog",
+        "vb" => "vb.net",
+        "vhd" | "vhdl" => "vhdl",
+        "wat" => "webassembly",
+        // Shared extensions: follow GitHub Linguist's default instead of guessing per file.
+        "m" => "objective-c",
+        "v" => "verilog",
         _ => return None,
     })
 }
@@ -109,5 +153,29 @@ mod tests {
         assert_eq!(lang("data.bin"), "plain text");
         assert_eq!(lang("noext"), "plain text");
         assert_eq!(lang(".gitignore"), "plain text");
+    }
+
+    #[test]
+    fn extended_languages_map() {
+        assert_eq!(lang("app.ex"), "elixir");
+        assert_eq!(lang("core.clj"), "clojure");
+        assert_eq!(lang("node.erl"), "erlang");
+        assert_eq!(lang("Lib.fs"), "f#");
+        assert_eq!(lang("shader.frag"), "glsl");
+        assert_eq!(lang("build.gradle"), "groovy");
+        assert_eq!(lang("main.jl"), "julia");
+        assert_eq!(lang("token.sol"), "solidity");
+        assert_eq!(lang("schema.proto"), "protobuf");
+        assert_eq!(lang("infra.tf"), "hcl");
+    }
+
+    #[test]
+    fn shared_extensions_follow_linguist_defaults() {
+        // These extensions are claimed by more than one language; we commit to Linguist's
+        // default rather than sniff file contents.
+        assert_eq!(lang("legacy.m"), "objective-c");
+        assert_eq!(lang("cpu.v"), "verilog");
+        assert_eq!(lang("solve.pl"), "perl");
+        assert_eq!(lang("solve.pro"), "prolog");
     }
 }
