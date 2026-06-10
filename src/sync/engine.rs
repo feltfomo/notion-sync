@@ -107,6 +107,16 @@ fn sanitize_segment(title: &str) -> Option<String> {
     Some(t.to_string())
 }
 
+/// Notion ids come in two forms: the dashed UUID the API returns
+/// (`378f23c5-af95-...`) and the compact 32-char hex a user typically pastes into a
+/// config `parent_page_id` (`378f23c5af95...`). Compare them dash- and case-insensitively
+/// so a mapping root written either way still matches the dashed parent id the API hands
+/// back. Without this, discovery never recognizes a mapping root and silently treats every
+/// new page as un-placeable.
+fn normalize_page_id(id: &str) -> String {
+    id.replace('-', "").to_lowercase()
+}
+
 impl Engine {
     pub fn abs_path(&self, rel: &str) -> PathBuf {
         // A namespaced rel_path is `<mapping name>/<path within that mapping's root>`.
@@ -828,11 +838,13 @@ impl Engine {
     async fn placement_for(&self, page: &PageResp) -> Option<String> {
         let parent_id = page.parent_page_id()?;
         let name = sanitize_segment(&page.title())?;
+        // Config ids are commonly compact; API parent ids are dashed. Normalize both.
+        let parent_norm = normalize_page_id(parent_id);
         if let Some(m) = self
             .cfg
             .mappings
             .iter()
-            .find(|m| m.parent_page_id.as_str() == parent_id)
+            .find(|m| normalize_page_id(&m.parent_page_id) == parent_norm)
         {
             return Some(format!("{}/{}", m.name, name));
         }
@@ -962,9 +974,21 @@ pub mod anyhow_lite {
 
 #[cfg(test)]
 mod tests {
+    use super::normalize_page_id;
     use super::reassemble_page_body;
     use super::sanitize_segment;
     use crate::api::models::BlockResp;
+
+    #[test]
+    fn normalize_page_id_is_dash_and_case_insensitive() {
+        // The config commonly holds a compact 32-char id; the API returns a dashed,
+        // sometimes upper-cased UUID. Discovery must see them as the same root.
+        let compact = "378f23c5af9580a59a6dc218fa24b366";
+        let dashed = "378F23C5-AF95-80A5-9A6D-C218FA24B366";
+        assert_eq!(normalize_page_id(dashed), compact);
+        assert_eq!(normalize_page_id(compact), compact);
+        assert_eq!(normalize_page_id(dashed), normalize_page_id(compact));
+    }
 
     #[test]
     fn sanitize_segment_trims_and_rejects_traversal_and_separators() {
