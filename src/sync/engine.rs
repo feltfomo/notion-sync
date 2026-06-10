@@ -8,13 +8,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::conflict;
 use super::locks::PathLocks;
 use super::snapshot::ObjectStore;
 use super::util;
-use crate::api::models::{BlockResp, CalloutBlockReq};
+use crate::api::models::{BlockResp, CalloutBlockReq, PageResp};
 use crate::api::NotionClient;
 use crate::chunk;
 use crate::config::Config;
@@ -76,6 +76,35 @@ fn reassemble_page_body(blocks: Vec<BlockResp>) -> PageBody {
         text,
         foreign_blocks,
     }
+}
+
+/// Outcome of a discovery probe, so the poller can tell "foreign page, stop asking"
+/// from "ours but not mirrorable yet, ask again". The webhook path ignores it.
+pub enum Discovery {
+    /// A new local file was written and tracked.
+    Created,
+    /// The id was already tracked; nothing to do.
+    AlreadyTracked,
+    /// Not part of any mapping tree (or an unusable title). Safe to stop re-probing.
+    NotPlaceable,
+    /// Placeable but skipped for now (empty, or split into non-code blocks). May gain a
+    /// real body later, so callers should NOT cache it as foreign.
+    Skipped,
+}
+
+/// Sanitize a Notion page title into a single safe path segment, or None if it can't be
+/// one. A discovered title becomes a filename, so anything that could escape the mapping
+/// root or name an entry we don't mean (path separators, the `.`/`..` entries, an
+/// embedded NUL, an empty/whitespace title) is rejected rather than coerced.
+fn sanitize_segment(title: &str) -> Option<String> {
+    let t = title.trim();
+    if t.is_empty() || t == "." || t == ".." {
+        return None;
+    }
+    if t.contains('/') || t.contains('\\') || t.contains('\0') {
+        return None;
+    }
+    Some(t.to_string())
 }
 
 impl Engine {
@@ -790,6 +819,139 @@ impl Engine {
         let _g = lock.lock().await;
         conflict::resolve_pull(self, node).await
     }
+
+    /// Where an untracked page belongs on disk, if anywhere. The parent must resolve to
+    /// a known anchor: a mapping's configured root page (=> `<mapping>/<title>`) or an
+    /// already-tracked directory node (=> `<dir>/<title>`). A parent that is itself an
+    /// untracked page is deliberately NOT followed -- placing a file under a dir we
+    /// don't track yet would leave state.db inconsistent; reconcile owns that case.
+    async fn placement_for(&self, page: &PageResp) -> Option<String> {
+        let parent_id = page.parent_page_id()?;
+        let name = sanitize_segment(&page.title())?;
+        if let Some(m) = self
+            .cfg
+            .mappings
+            .iter()
+            .find(|m| m.parent_page_id.as_str() == parent_id)
+        {
+            return Some(format!("{}/{}", m.name, name));
+        }
+        let parent = {
+            self.state
+                .lock()
+                .await
+                .get_by_page_id(parent_id)
+                .ok()
+                .flatten()
+        };
+        match parent {
+            Some(n) if n.kind == NodeKind::Dir => Some(format!("{}/{}", n.rel_path, name)),
+            _ => None,
+        }
+    }
+
+    /// Mirror an untracked Notion page to disk from just its page id (all the webhook or
+    /// poller has). Conservative: only a page that places under a tracked parent chain
+    /// AND reads back as a faithful, non-empty code body becomes a file. Trashed pages,
+    /// foreign-block pages, empty pages, and pages outside any mapping are left alone.
+    /// Idempotent under the per-path lock, so a created+content_updated burst (or a
+    /// webhook racing the poller) can't double-create.
+    ///
+    /// Echo note: a page WE just pushed is tracked by the push itself, so the early
+    /// tracked-check no-ops it. Callers that have author info (webhook event authors,
+    /// poller last_edited_by) still pre-filter so we don't even probe our own writes.
+    pub async fn discover_remote_page(&self, page_id: &str) -> anyhow_lite::Result<Discovery> {
+        if self
+            .state
+            .lock()
+            .await
+            .get_by_page_id(page_id)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return Ok(Discovery::AlreadyTracked);
+        }
+        let page = self
+            .api
+            .get_page(page_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        if page.trashed() {
+            return Ok(Discovery::NotPlaceable);
+        }
+        let Some(rel_path) = self.placement_for(&page).await else {
+            return Ok(Discovery::NotPlaceable);
+        };
+
+        let lock = self.locks.lock_for(&rel_path).await;
+        let _g = lock.lock().await;
+        // Re-check under the lock: another discovery (or the push that created this page)
+        // may have tracked the path or id while we were resolving placement.
+        {
+            let st = self.state.lock().await;
+            if st.get_by_path(&rel_path).ok().flatten().is_some()
+                || st.get_by_page_id(page_id).ok().flatten().is_some()
+            {
+                return Ok(Discovery::AlreadyTracked);
+            }
+        }
+
+        // Read the body once: collect the ordered code-block ids (for later overwrites)
+        // and reassemble the text in the same pass.
+        let blocks = self
+            .api
+            .list_children(page_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let block_ids: Vec<String> = blocks
+            .iter()
+            .filter(|b| b.ty == "code")
+            .map(|b| b.id.clone())
+            .collect();
+        let body = reassemble_page_body(blocks);
+        if body.foreign_blocks > 0 {
+            warn!(rel_path, page = %page_id, foreign = body.foreign_blocks,
+                "discovered page split into non-code blocks; not mirroring (leaving to reconcile/manual)");
+            return Ok(Discovery::Skipped);
+        }
+        if body.text.is_empty() {
+            // An empty page is indistinguishable from an empty file here, and we chose not
+            // to materialize empty files from remote. Skip; it may gain a body later.
+            debug!(rel_path, page = %page_id, "discovered page has no code body yet; skipping");
+            return Ok(Discovery::Skipped);
+        }
+
+        let content = body.text;
+        let hash = hashutil::hash_str(&content);
+        let abs = self.abs_path(&rel_path);
+        // Mark our own write before touching disk so the watcher reads the resulting fs
+        // event as an echo instead of a fresh local change to push straight back.
+        self.note_self_write(&rel_path, &hash).await;
+        util::atomic_write(&abs, content.into_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+        let parent_page_id = page.parent_page_id().unwrap_or_default().to_string();
+        let st = self.state.lock().await;
+        st.upsert(&Node {
+            rel_path: rel_path.clone(),
+            kind: NodeKind::File,
+            notion_page_id: page.id.clone(),
+            parent_page_id,
+            content_hash: Some(hash.clone()),
+            body_block_ids: block_ids,
+            local_mtime_ns: util::file_mtime_ns(&abs),
+            notion_last_edited: Some(page.last_edited_time.clone()),
+            last_synced_dir: Some("from_notion".into()),
+            is_binary_placeholder: false,
+        })
+        .map_err(|e| e.to_string())?;
+        drop(st);
+        self.journal(&rel_path, "discover", None, Some(&hash), "from_notion")
+            .await;
+        info!(rel_path, page = %page_id, "discovered untracked Notion page; created local file");
+        Ok(Discovery::Created)
+    }
 }
 
 /// A tiny local Result alias + error so we don't pull in the `anyhow` crate
@@ -801,7 +963,22 @@ pub mod anyhow_lite {
 #[cfg(test)]
 mod tests {
     use super::reassemble_page_body;
+    use super::sanitize_segment;
     use crate::api::models::BlockResp;
+
+    #[test]
+    fn sanitize_segment_trims_and_rejects_traversal_and_separators() {
+        assert_eq!(sanitize_segment("main.rs").as_deref(), Some("main.rs"));
+        assert_eq!(sanitize_segment("  notes  ").as_deref(), Some("notes"));
+        // A title that's empty, whitespace, or the dot entries can't name a file.
+        assert!(sanitize_segment("").is_none());
+        assert!(sanitize_segment("   ").is_none());
+        assert!(sanitize_segment(".").is_none());
+        assert!(sanitize_segment("..").is_none());
+        // Separators would escape the mapping root / name a nested entry we don't mean.
+        assert!(sanitize_segment("a/b").is_none());
+        assert!(sanitize_segment("a\\b").is_none());
+    }
 
     fn blocks_from(json: serde_json::Value) -> Vec<BlockResp> {
         serde_json::from_value(json).expect("valid block fixtures")

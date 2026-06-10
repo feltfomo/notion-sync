@@ -12,13 +12,13 @@
 //! integration bot AND whose content still matches what we last synced; a bot-attributed
 //! page whose body has actually diverged is still pulled.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use tracing::{debug, info, warn};
 
-use super::engine::Engine;
+use super::engine::{Discovery, Engine};
 
 /// Run the root health-check once every this many poll cycles.
 const HEALTH_CHECK_EVERY: u32 = 20;
@@ -30,6 +30,11 @@ const HEALTH_CHECK_EVERY: u32 = 20;
 /// latency. The idle API savings past a minute or two are negligible (one search call
 /// per cycle), so cap the backoff near the floor to keep remote edits landing promptly.
 const MAX_IDLE_BACKOFF_SECS: u64 = 90;
+
+/// Cap on discovery probes per poll cycle. Each probe is a GET, and a freshly enabled
+/// daemon facing a big workspace shouldn't turn one cycle into a scan of every recently
+/// edited foreign page; the rest are picked up over subsequent cycles.
+const MAX_DISCOVERY_PROBES_PER_CYCLE: usize = 20;
 
 /// Ceiling for the idle backoff given the configured poll floor. Never below the floor,
 /// so a deployment that deliberately polls slowly is still honored.
@@ -47,6 +52,9 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
     let ceil = idle_backoff_ceiling(floor);
     let mut delay = floor;
     let mut cycle: u32 = 0;
+    // Page ids ruled out as not part of any mapping tree, remembered for this run so the
+    // untracked-page discovery scan doesn't re-probe the same foreign pages every cycle.
+    let mut not_ours: HashSet<String> = HashSet::new();
     info!(secs = engine.cfg.poll_interval_secs, "poller started");
 
     loop {
@@ -60,7 +68,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                 if cycle % HEALTH_CHECK_EVERY == 0 {
                     health_check(&engine).await;
                 }
-                match poll_once(&engine).await {
+                match poll_once(&engine, &mut not_ours).await {
                     Ok(changed) => {
                         if changed > 0 {
                             // Activity: poll eagerly again, announcing the return to the floor.
@@ -97,7 +105,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
 
 /// Returns the number of nodes that changed (pulled or remotely deleted) this cycle
 /// so the caller can drive idle backoff.
-async fn poll_once(engine: &Arc<Engine>) -> Result<usize, String> {
+async fn poll_once(engine: &Arc<Engine>, not_ours: &mut HashSet<String>) -> Result<usize, String> {
     let nodes = {
         engine
             .state
@@ -109,14 +117,16 @@ async fn poll_once(engine: &Arc<Engine>) -> Result<usize, String> {
 
     // One paginated search gives last-edit timestamps for many pages, letting us skip
     // unchanged nodes without a per-node GET. Pages absent from the map (huge
-    // workspaces, pagination cap, search lag) fall back to an individual fetch.
-    let recent: HashMap<String, String> = match engine.api.search_pages_by_last_edited().await {
-        Ok(pairs) => pairs.into_iter().collect(),
+    // workspaces, pagination cap, search lag) fall back to an individual fetch. The same
+    // list (newest first) also drives the untracked-page discovery scan below.
+    let recent_pairs = match engine.api.search_pages_by_last_edited().await {
+        Ok(pairs) => pairs,
         Err(e) => {
             warn!(error = %e, "search prefilter failed; falling back to per-node fetch");
-            HashMap::new()
+            Vec::new()
         }
     };
+    let recent: HashMap<String, String> = recent_pairs.iter().cloned().collect();
 
     let mut changed = 0usize;
     for node in nodes {
@@ -191,7 +201,70 @@ async fn poll_once(engine: &Arc<Engine>) -> Result<usize, String> {
             changed += 1;
         }
     }
+
+    // Fallback discovery: catch pages created or edited in Notion that we don't track yet
+    // (webhooks off, or a page.created we never received). Bounded per cycle because each
+    // probe costs a GET, and foreign pages are remembered so we stop asking.
+    changed += discover_untracked(engine, &recent_pairs, not_ours).await;
+
     Ok(changed)
+}
+
+/// Probe up to a capped number of recently-edited, untracked pages for discovery,
+/// returning how many became new local files. Foreign (un-placeable) pages are cached in
+/// `not_ours` so later cycles skip them; an "ours but no body yet" page is left uncached
+/// so it's re-probed once it gains content.
+async fn discover_untracked(
+    engine: &Arc<Engine>,
+    recent_newest_first: &[(String, String)],
+    not_ours: &mut HashSet<String>,
+) -> usize {
+    let tracked_ids: HashSet<String> = match engine.state.lock().await.all_tracked() {
+        Ok(nodes) => nodes.into_iter().map(|n| n.notion_page_id).collect(),
+        Err(e) => {
+            warn!(error = %e, "could not load tracked ids for discovery scan; skipping it this cycle");
+            return 0;
+        }
+    };
+    let candidates = discovery_candidates(
+        recent_newest_first,
+        &tracked_ids,
+        not_ours,
+        MAX_DISCOVERY_PROBES_PER_CYCLE,
+    );
+    let mut created = 0usize;
+    for page_id in candidates {
+        match engine.discover_remote_page(page_id).await {
+            Ok(Discovery::Created) => {
+                info!(page = %page_id, "poller discovered untracked Notion page");
+                created += 1;
+            }
+            Ok(Discovery::NotPlaceable) => {
+                not_ours.insert(page_id.to_string());
+            }
+            // AlreadyTracked / Skipped: don't cache -- a skipped page may gain a body, and
+            // a now-tracked one drops out of the candidate set on its own next cycle.
+            Ok(_) => {}
+            Err(e) => warn!(page = %page_id, error = %e, "discovery probe failed"),
+        }
+    }
+    created
+}
+
+/// Pure candidate selection: recently-edited pages (newest first) we neither track nor
+/// have already ruled out, capped to bound the GETs one cycle can issue.
+fn discovery_candidates<'a>(
+    recent_newest_first: &'a [(String, String)],
+    tracked_ids: &HashSet<String>,
+    not_ours: &HashSet<String>,
+    cap: usize,
+) -> Vec<&'a str> {
+    recent_newest_first
+        .iter()
+        .map(|(id, _)| id.as_str())
+        .filter(|id| !tracked_ids.contains(*id) && !not_ours.contains(*id))
+        .take(cap)
+        .collect()
 }
 
 /// Confirm the configured root page is still reachable; a revoked share or a trashed
@@ -225,6 +298,26 @@ async fn health_check(engine: &Arc<Engine>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovery_candidates_skips_tracked_and_known_foreign_and_caps() {
+        let recent: Vec<(String, String)> = vec![
+            ("a".into(), "t3".into()),
+            ("b".into(), "t2".into()),
+            ("c".into(), "t1".into()),
+            ("d".into(), "t0".into()),
+        ];
+        let tracked: HashSet<String> = ["b".to_string()].into_iter().collect();
+        let not_ours: HashSet<String> = ["c".to_string()].into_iter().collect();
+
+        // Tracked ('b') and known-foreign ('c') are filtered; newest-first order kept.
+        let picked = discovery_candidates(&recent, &tracked, &not_ours, 10);
+        assert_eq!(picked, vec!["a", "d"]);
+
+        // The cap bounds how many GETs one cycle can issue.
+        let capped = discovery_candidates(&recent, &HashSet::new(), &HashSet::new(), 2);
+        assert_eq!(capped, vec!["a", "b"]);
+    }
 
     #[test]
     fn idle_backoff_is_bounded_near_the_floor() {

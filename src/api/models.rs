@@ -142,6 +142,14 @@ pub struct PageResp {
     /// instead of) `in_trash`. Treated as equivalent for trash detection.
     #[serde(default)]
     pub archived: Option<bool>,
+    /// The page's parent. Remote-first discovery walks this back to a mapping root to
+    /// place an untracked page on disk. Calls that don't need it just ignore it.
+    #[serde(default)]
+    pub parent: Option<ParentResp>,
+    /// Page properties, projected to just the title (the only property a page-parented
+    /// page carries). Used to derive a discovered page's filename.
+    #[serde(default)]
+    pub properties: Option<PageProperties>,
 }
 
 impl PageResp {
@@ -150,6 +158,55 @@ impl PageResp {
     pub fn trashed(&self) -> bool {
         self.in_trash || self.archived.unwrap_or(false)
     }
+
+    /// The parent page id, but only when the parent is actually another page. A
+    /// workspace/database/data_source parent returns None: those aren't part of any
+    /// file-tree mapping, so a page under one can't be placed on disk.
+    pub fn parent_page_id(&self) -> Option<&str> {
+        let p = self.parent.as_ref()?;
+        if p.ty == "page_id" {
+            p.page_id.as_deref()
+        } else {
+            None
+        }
+    }
+
+    /// The page title as plain text (title rich-text runs concatenated). Empty when the
+    /// title is unset or wasn't projected. This is the inverse of `util::title_for`,
+    /// which names every file page after its filename, so the title IS the filename.
+    pub fn title(&self) -> String {
+        let Some(props) = &self.properties else {
+            return String::new();
+        };
+        let Some(t) = &props.title else {
+            return String::new();
+        };
+        t.title.iter().map(|r| r.plain_text.as_str()).collect()
+    }
+}
+
+/// Minimal projection of a page `parent` object. Only the page-parent case carries an
+/// id we can act on; the `type` discriminates it from workspace/database parents.
+#[derive(Debug, Deserialize)]
+pub struct ParentResp {
+    #[serde(rename = "type", default)]
+    pub ty: String,
+    #[serde(default)]
+    pub page_id: Option<String>,
+}
+
+/// Page `properties`, projected to just the title. A page parented by another page only
+/// carries a title property (always keyed "title"), so that's all we model.
+#[derive(Debug, Deserialize)]
+pub struct PageProperties {
+    #[serde(default)]
+    pub title: Option<TitleProp>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TitleProp {
+    #[serde(default)]
+    pub title: Vec<RichTextResp>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -204,4 +261,38 @@ pub struct ChildrenListResp {
     pub next_cursor: Option<String>,
     #[serde(default)]
     pub has_more: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn title_concatenates_rich_text_runs_and_reads_page_parent() {
+        let page: PageResp = serde_json::from_value(serde_json::json!({
+            "id": "p1",
+            "last_edited_time": "t",
+            "parent": { "type": "page_id", "page_id": "parent-1" },
+            "properties": { "title": { "title": [
+                { "plain_text": "main" }, { "plain_text": ".rs" }
+            ] } }
+        }))
+        .unwrap();
+        assert_eq!(page.title(), "main.rs");
+        assert_eq!(page.parent_page_id(), Some("parent-1"));
+    }
+
+    #[test]
+    fn non_page_parent_and_missing_title_are_none_and_empty() {
+        // A workspace-rooted page has no page parent to place under, and a page with no
+        // projected title yields an empty filename (rejected downstream).
+        let page: PageResp = serde_json::from_value(serde_json::json!({
+            "id": "p2",
+            "last_edited_time": "t",
+            "parent": { "type": "workspace", "workspace": true }
+        }))
+        .unwrap();
+        assert_eq!(page.parent_page_id(), None);
+        assert_eq!(page.title(), "");
+    }
 }

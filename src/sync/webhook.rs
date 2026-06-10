@@ -30,7 +30,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{watch, RwLock};
 use tracing::{debug, error, info, warn};
 
-use super::engine::Engine;
+use super::engine::{Discovery, Engine};
 use crate::config::Webhook;
 
 /// Shared receiver state. The signing secret can change at runtime (the handshake
@@ -191,12 +191,13 @@ enum Action {
     Ignore,
 }
 
-/// Map an event type to a local action. Deliberately conservative: only the two shapes
-/// we know how to act on map to work; everything else (moves, property-only edits,
-/// undeletes, comments, database/data_source events) is left to the poller for now.
+/// Map an event type to a local action. Deliberately conservative: page creates and
+/// content updates route to Pull (a tracked page pulls, an untracked one is a discovery
+/// candidate), deletes mirror the trash, and everything else (moves, property-only edits,
+/// undeletes, comments, database/data_source events) is left to the poller.
 fn action_for(event_type: &str) -> Action {
     match event_type {
-        "page.content_updated" => Action::Pull,
+        "page.created" | "page.content_updated" => Action::Pull,
         "page.deleted" => Action::Delete,
         _ => Action::Ignore,
     }
@@ -209,10 +210,11 @@ fn authored_only_by(authors: &[Author], bot_user_id: &str) -> bool {
     !authors.is_empty() && authors.iter().all(|a| a.id == bot_user_id)
 }
 
-/// Apply a verified event to the local mirror, reusing the engine's existing pull/delete
-/// paths. The entity id from the payload is matched against tracked pages; an unmatched
-/// id is an untracked page (remote-first discovery is a later phase), so we leave it to
-/// the poller rather than guessing.
+/// Apply a verified event to the local mirror, reusing the engine's existing pull/delete/
+/// discovery paths. The entity id is matched against tracked pages: a tracked page pulls
+/// (or, for a delete, mirrors the trash); an untracked page that was created or updated is
+/// handed to discovery, which adopts it only if it places under a tracked parent chain and
+/// reads back as a faithful code body. Anything else stays the poller's job.
 async fn dispatch(engine: &Engine, ev: &WebhookEvent) {
     let action = action_for(&ev.ty);
     if matches!(action, Action::Ignore) {
@@ -224,23 +226,24 @@ async fn dispatch(engine: &Engine, ev: &WebhookEvent) {
         let st = engine.state.lock().await;
         st.get_by_page_id(&ev.entity.id).ok().flatten()
     };
-    let Some(node) = node else {
-        debug!(ty = %ev.ty, entity = %ev.entity.id, entity_type = %ev.entity.ty, "webhook event for an untracked page; ignoring (remote discovery is a later phase)");
-        return;
-    };
 
-    match action {
-        Action::Delete => {
+    match (action, node) {
+        // A tracked page that was trashed: mirror the delete locally.
+        (Action::Delete, Some(node)) => {
             info!(rel_path = %node.rel_path, "webhook: remote page trashed; applying remote delete locally");
             if let Err(e) = engine.handle_remote_delete(&node).await {
                 warn!(rel_path = %node.rel_path, error = %e, "webhook-driven remote delete failed");
             }
         }
-        Action::Pull => {
-            // Same echo rule as the poller (engine::remote_body_matches_last_sync is the
-            // shared half): an edit attributed solely to our bot whose remote body still
-            // hashes to what we last synced is our own push coming back -- skip it. A human
-            // co-author, or a body that has actually diverged, is a real edit to pull.
+        // A delete for a page we never tracked is a no-op.
+        (Action::Delete, None) => {
+            debug!(ty = %ev.ty, entity = %ev.entity.id, "webhook delete for an untracked page; nothing to do");
+        }
+        // A tracked page changed: pull, reusing the poller's content echo guard. Same rule
+        // (engine::remote_body_matches_last_sync is the shared half): an edit attributed
+        // solely to our bot whose remote body still hashes to what we last synced is our
+        // own push coming back -- skip it. A human co-author, or a diverged body, is real.
+        (Action::Pull, Some(node)) => {
             if authored_only_by(&ev.authors, &engine.bot_user_id)
                 && engine.remote_body_matches_last_sync(&node).await
             {
@@ -252,7 +255,30 @@ async fn dispatch(engine: &Engine, ev: &WebhookEvent) {
                 warn!(rel_path = %node.rel_path, error = %e, "webhook-driven pull failed");
             }
         }
-        Action::Ignore => {}
+        // An untracked page created/updated under our tree: try to discover it. Skip the
+        // probe when the event names a non-page entity, or is attributed solely to our own
+        // bot (our just-pushed page, which the push itself will track -- adopting it here
+        // would race that push).
+        (Action::Pull, None) => {
+            if !ev.entity.ty.is_empty() && ev.entity.ty != "page" {
+                debug!(ty = %ev.ty, entity = %ev.entity.id, entity_type = %ev.entity.ty, "webhook event for a non-page entity; leaving to the poller");
+                return;
+            }
+            if authored_only_by(&ev.authors, &engine.bot_user_id) {
+                debug!(ty = %ev.ty, entity = %ev.entity.id, "webhook: untracked page authored only by us; the in-flight push will track it");
+                return;
+            }
+            match engine.discover_remote_page(&ev.entity.id).await {
+                Ok(Discovery::Created) => {}
+                Ok(_) => {
+                    debug!(ty = %ev.ty, entity = %ev.entity.id, "webhook: untracked page not mirrored (outside the tree or no code body yet)")
+                }
+                Err(e) => {
+                    warn!(entity = %ev.entity.id, error = %e, "webhook-driven discovery failed")
+                }
+            }
+        }
+        (Action::Ignore, _) => {}
     }
 }
 
@@ -435,6 +461,7 @@ mod tests {
 
     #[test]
     fn action_routing_handles_pull_delete_and_falls_through_to_ignore() {
+        assert!(matches!(action_for("page.created"), Action::Pull));
         assert!(matches!(action_for("page.content_updated"), Action::Pull));
         assert!(matches!(action_for("page.deleted"), Action::Delete));
         // Anything we don't explicitly act on stays with the poller -- never a blind pull.
