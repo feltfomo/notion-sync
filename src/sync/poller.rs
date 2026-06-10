@@ -178,11 +178,8 @@ async fn poll_once(engine: &Arc<Engine>, not_ours: &mut HashSet<String>) -> Resu
             .map(|u| u.id == engine.bot_user_id)
             .unwrap_or(false);
         if looks_self_authored {
-            // last_edited_by names only the latest editor, so a human edit landing in
-            // the same window as one of our writes is attributed to the bot. Verify by
-            // content: the remote body must still hash to what we last synced for this to
-            // be our own echo. The content check lives on the engine so the webhook
-            // worker can share the exact same rule against its event `authors`.
+            // The content check lives on the engine so the webhook worker can apply the
+            // same rule to its event `authors`.
             if engine.remote_body_matches_last_sync(&node).await {
                 debug!(rel_path = %node.rel_path, "skipping self-authored edit (content matches last sync)");
                 // Record the new timestamp so we don't re-evaluate it forever.

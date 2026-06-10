@@ -4,6 +4,39 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-06-09
+
+### Added
+- **Webhook receiver (Notion -> local push).** An optional `[webhook]` table starts a
+  small HTTP listener that Notion integration webhooks post to, so a remote edit lands in
+  seconds instead of waiting for the next poll. Off by default. When enabled it handles
+  Notion's one-time verification handshake, persists the signing token under
+  `$XDG_STATE_HOME/notion-sync/` so a restart doesn't force re-verification, and verifies
+  every event after that (HMAC-SHA256 over the raw body). Notion only delivers to public
+  HTTPS, so the intended deployment terminates TLS in a tunnel (e.g. cloudflared) and
+  forwards to the loopback listener. A bad bind or a busy port is non-fatal: the daemon
+  logs it and keeps polling.
+- **Remote-first page discovery.** A page created or edited in Notion that we don't track
+  yet is adopted as a local file when it places under a mapping's parent chain and reads
+  back as a faithful code body. Both paths feed it: the webhook acts on `page.created` /
+  `page.content_updated`, and the poller scans recently-edited untracked pages each cycle
+  (bounded per cycle, with foreign pages remembered so it stops re-probing them). An empty
+  page, or one split into non-code blocks, is skipped until it gains a real body.
+
+### Changed
+- **The poller is a fallback now, not the only path.** With webhooks on, the poll loop
+  still runs for the deliveries Notion drops, reorders, or aggregates (delivery is
+  at-most-once and best-effort), and it stays the sole mechanism when webhooks are off.
+  Echo suppression is shared by both paths: an edit attributed solely to our bot whose
+  body still hashes to the last sync is skipped; a human co-author or a diverged body is
+  pulled.
+
+### Fixed
+- **Discovery matches compact config roots.** A `parent_page_id` written compact (no
+  dashes) never matched the dashed UUID the API returns, so every discovered page resolved
+  to un-placeable and was silently dropped. Page ids are now normalized (dashes stripped,
+  lowercased) before matching a mapping root.
+
 ## [0.4.0] - 2026-06-09
 
 ### Added
@@ -161,6 +194,7 @@ All notable changes to this project are documented here. The format is based on
 - Initial one-way mirror (local -> Notion) with watcher, poller, reconcile, local-wins
   conflict handling, and the chunk fidelity probe.
 
+[0.5.0]: https://github.com/feltfomo/notion-sync/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/feltfomo/notion-sync/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/feltfomo/notion-sync/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/feltfomo/notion-sync/compare/v0.2.0...v0.2.1

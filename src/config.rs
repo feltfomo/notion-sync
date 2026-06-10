@@ -70,8 +70,8 @@ pub struct RawWebhook {
     /// when $NOTION_WEBHOOK_SECRET is unset. Absent is fine: the one-time handshake
     /// delivers the token and the receiver persists it under the state dir.
     pub secret_file: Option<PathBuf>,
-    /// Phase 4 knob, parsed now so the schema is stable: how slow the poller may run when
-    /// webhook pushes are covering the common case.
+    /// How slow the poller may fall back to once webhook pushes cover the common case.
+    /// Parsed now so the schema is stable; not yet wired into the poll loop.
     pub fallback_poll_secs: u64,
 }
 

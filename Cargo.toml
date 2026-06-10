@@ -1,6 +1,6 @@
 [package]
 name = "notion-sync"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.74"
 license = "MIT"
@@ -9,7 +9,7 @@ repository = "https://github.com/feltfomo/notion-sync"
 # `cargo run` (no --bin) launches the daemon; the probe stays opt-in via --bin.
 default-run = "notion-sync"
 
-# Two binaries: the daemon, and the standalone fidelity probe (Step 1 hard gate).
+# Two binaries: the daemon, and the standalone fidelity probe (the write-back fidelity gate).
 [[bin]]
 name = "notion-sync"
 path = "src/main.rs"

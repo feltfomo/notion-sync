@@ -42,7 +42,7 @@ The `-gnu` builds are smaller glibc binaries and otherwise identical. To verify 
 ### Option C: build from source
 
 ```sh
-cargo install --git https://github.com/feltfomo/notion-sync --tag v0.3.0
+cargo install --git https://github.com/feltfomo/notion-sync --tag v0.5.0
 ```
 
 From a checkout:
@@ -98,8 +98,9 @@ On first run with no config, the daemon writes a starter `~/.config/notion-sync/
 ## How it works
 
 ```text
-local file saved  ──(debounce 750–2000ms)──▶  watcher ─▶ engine ─▶ Notion page
-Notion page edited ──(poll every 45s)──────▶  poller ─▶ conflict (local-wins) ─▶ local file
+local file saved    ──(debounce ~1s)──────▶  watcher  ─▶ engine ─▶ Notion page
+Notion page edited  ──(webhook, seconds)──▶  receiver ─┐
+                    ──(poll, 45s)──────────▶  poller   ─┴▶ conflict (local-wins) ─▶ local file
 
             state.db (SQLite, machine-local) tracks the file ⇄ page mapping
 ```
@@ -111,6 +112,8 @@ Notion page edited ──(poll every 45s)──────▶  poller ─▶ co
 - Symlinks are skipped, never followed.
 - A shared token-bucket rate limiter (~3 req/s) covers the watcher and poller. 429s honor `Retry-After`; 409/5xx use exponential backoff with jitter.
 - Startup reconciliation adopts existing pages by title, and skips any mapping whose local tree is missing or empty so a transient glitch can't wipe its mirror.
+- A page created directly in Notion under a mapped parent is adopted as a local file once it reads back as a real code body. Empty pages, and pages split into non-code blocks, are skipped until they have one.
+- With `[webhook]` on, Notion pushes edits to a local receiver so pulls land in seconds instead of waiting for the next poll; the poller stays on as the fallback. See [Webhooks](#webhooks-optional).
 - Add a `[[mapping]]` block per directory to mirror multiple trees from one daemon.
 
 ## Fidelity check (optional)
@@ -150,7 +153,7 @@ parent_page_id = "fedcba9876543210fedcba9876543210"
 ignore         = [".git", ".notion-sync"]
 ```
 
-`name` is optional (defaults to the last component of `local_root`) and must be unique. A single `[mapping]` table is also accepted.
+`name` is optional (defaults to the last component of `local_root`) and must be unique. A single `[mapping]` table is also accepted. For the optional `[webhook]` table, see [Webhooks](#webhooks-optional).
 
 ### Per-directory overrides
 
@@ -164,9 +167,40 @@ max_file_bytes = 20000000             # overrides the central cap for this direc
 
 It honors only those two keys; anything else (`parent_page_id`, `local_root`, `token_file`) is rejected, so a mapping can't be repointed from inside its own tree. `.notion-sync.toml` and the `.notion-sync/` state dir are never mirrored.
 
-## NixOS
+## Webhooks (optional)
 
-`flake.nix` exposes a package, a `nix run` app, and `nixosModules.default`. The token comes from `EnvironmentFile=` and never touches the Nix store.
+Polling every 45s works, but a remote edit can take most of that window to show up. Turn on the webhook receiver and Notion pushes the change instead, so it lands in seconds. The poller stays on as the fallback — Notion delivery is at-most-once and can be dropped, reordered, or batched — so this is a latency win, never the only path.
+
+```toml
+[webhook]
+enabled            = true
+bind               = "127.0.0.1"
+port               = 8080
+path               = "/notion-webhook"
+fallback_poll_secs = 900
+```
+
+Notion only delivers to a public HTTPS URL, never to localhost, so the receiver binds loopback and expects something in front to terminate TLS and forward to it. A tunnel is the easy route:
+
+```sh
+cloudflared tunnel --url http://127.0.0.1:8080
+```
+
+Then, in the integration's **Webhooks** tab, point a subscription at `https://<your-tunnel>/notion-webhook`. On first connect Notion posts a one-time `verification_token`; the daemon logs it and persists it under `$XDG_STATE_HOME/notion-sync/webhook_secret`, and you paste it back into that tab to verify. After that every event is checked (HMAC-SHA256 over the raw body), and the secret survives restarts, so you only verify once.
+
+To pin the secret yourself instead of relying on the persisted handshake, set `$NOTION_WEBHOOK_SECRET` or point `secret_file` at a file (sops-nix / systemd `LoadCredential` friendly).
+
+A quick `cloudflared tunnel --url` hands out a new random hostname each run — fine for testing, useless once verified, since Notion fixes the URL at verify time. For a real deployment use a named tunnel with a stable hostname.
+
+## NixOS / home-manager
+
+`flake.nix` exposes a package, a `nix run` app, and three modules:
+
+- `nixosModules.default` — the systemd *user* service.
+- `homeManagerModules.default` — the same service plus config materialized in `$HOME` (the central `config.toml` and any per-directory `.notion-sync.toml`).
+- `hjemModules.default` — config files only (hjem doesn't manage services); pair it with the NixOS module for the daemon.
+
+The token comes from `environmentFile` and never touches the Nix store.
 
 ```nix
 {
@@ -184,8 +218,12 @@ It honors only those two keys; anything else (`parent_page_id`, `local_root`, `t
         {
           services.notion-sync = {
             enable          = true;
-            configFile      = "/home/you/.config/notion-sync/config.toml";
             environmentFile = "/run/secrets/notion-sync.env"; # NOTION_TOKEN=...
+            settings.mapping = [
+              { local_root     = "/home/you/project";
+                parent_page_id = "0123456789abcdef0123456789abcdef";
+                ignore         = [ ".git" "target" ]; }
+            ];
           };
         }
       ];
@@ -196,17 +234,24 @@ It honors only those two keys; anything else (`parent_page_id`, `local_root`, `t
 
 Then `nixos-rebuild switch`. Update with `nix flake update notion-sync`.
 
-Options under `services.notion-sync`:
+`settings` mirrors `config.toml` one-to-one (top-level keys plus one or more `mapping` entries), renders to a store file, and is passed as `--config`. The rendered file holds no secrets, so a world-readable store path is fine. Prefer it; if you'd rather hand-manage the TOML, set `configFile` instead.
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `enable` | bool | `false` | Turn the user service on. |
 | `package` | package | the flake's `notion-sync` | The build to run. |
-| `configFile` | path | _required_ | Path to `config.toml`, passed as `--config`. |
-| `environmentFile` | path | _required_ | `0600` file holding `NOTION_TOKEN=...`. |
-| `logLevel` | string | `"info"` | `RUST_LOG` level: `error`, `warn`, `info`, `debug`, `trace`. |
+| `settings` | attrs | `{}` | Declarative `config.toml` (mirrors `config.example.toml`). Ignored when `configFile` is set. |
+| `configFile` | path | `null` | Use this existing TOML file instead of rendering `settings`. |
+| `environmentFile` | path | _required_ | `0600` file holding `NOTION_TOKEN=...` (add `NOTION_WEBHOOK_SECRET=...` if you pin it). |
+| `color` | enum | `"auto"` | ANSI color policy (`--color`): `auto`, `always`, `never`. |
+| `logTime` | enum | `"datetime"` | Log timestamp style (`--log-time`): `datetime`, `uptime`, `none`. |
+| `logLevel` | string | `"info"` | `RUST_LOG` directive. |
+
+The home-manager and hjem modules add `perDirectory.<path>` for per-tree `.notion-sync.toml` overrides, keyed relative to `$HOME`. Set exactly one of `settings` or `configFile` (the module asserts it).
 
 It runs as a user service and restarts on failure. On a headless box, enable lingering: `users.users.<name>.linger = true;` or `loginctl enable-linger <user>`.
+
+For webhooks under Nix, put the `[webhook]` table in `settings.webhook` and supply the signing secret via `environmentFile` (`NOTION_WEBHOOK_SECRET=...`) or let the one-time handshake persist it. The public-HTTPS tunnel (e.g. a `services.cloudflared` named tunnel) is deployed separately.
 
 ## State & limitations
 

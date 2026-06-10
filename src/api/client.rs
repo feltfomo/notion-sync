@@ -31,7 +31,7 @@ impl NotionClient {
         limiter: Arc<RateLimiter>,
     ) -> Result<Self, ApiError> {
         let http = reqwest::Client::builder()
-            .user_agent("notion-sync/0.2")
+            .user_agent("notion-sync/0.5")
             .build()?;
         Ok(NotionClient {
             http,
