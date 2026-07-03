@@ -87,9 +87,13 @@ pub enum Discovery {
     AlreadyTracked,
     /// Not part of any mapping tree (or an unusable title). Safe to stop re-probing.
     NotPlaceable,
-    /// Placeable but skipped for now (empty, or split into non-code blocks). May gain a
-    /// real body later, so callers should NOT cache it as foreign.
-    Skipped,
+    /// Placeable, but no code body yet (an empty page). It may gain one later, so callers
+    /// must NOT cache it -- re-probe on a future cycle.
+    SkippedNoBody,
+    /// Placeable, but split into non-code blocks (a structured edit of the mirror). It
+    /// won't repair itself, so callers should cache it: probe and warn once, not per
+    /// cycle. A restart's reconcile still picks it up if it's later rebuilt as clean code.
+    SkippedForeign,
 }
 
 /// Sanitize a Notion page title into a single safe path segment, or None if it can't be
@@ -925,13 +929,13 @@ impl Engine {
         if body.foreign_blocks > 0 {
             warn!(rel_path, page = %page_id, foreign = body.foreign_blocks,
                 "discovered page split into non-code blocks; not mirroring (leaving to reconcile/manual)");
-            return Ok(Discovery::Skipped);
+            return Ok(Discovery::SkippedForeign);
         }
         if body.text.is_empty() {
             // An empty page is indistinguishable from an empty file here, and we chose not
             // to materialize empty files from remote. Skip; it may gain a body later.
             debug!(rel_path, page = %page_id, "discovered page has no code body yet; skipping");
-            return Ok(Discovery::Skipped);
+            return Ok(Discovery::SkippedNoBody);
         }
 
         let content = body.text;

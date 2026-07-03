@@ -37,6 +37,29 @@ All notable changes to this project are documented here. The format is based on
   to un-placeable and was silently dropped. Page ids are now normalized (dashes stripped,
   lowercased) before matching a mapping root.
 
+## [0.5.2] - 2026-07-03
+
+### Fixed
+- **A missing `local_root` no longer crash-loops the daemon.** Config load used to
+  hard-error when a mapping's `local_root` wasn't a directory, so on a late-mount or
+  impermanence host a root that isn't there yet at boot took the whole daemon down on a
+  systemd restart loop. It now warns and keeps the mapping; reconcile, the poller
+  health-check, and the watcher already skip a missing root per mapping, and keeping it in
+  the config means the CLI subcommands still resolve that mapping's paths. Trade-off: a
+  genuinely typo'd root no longer fails fast, it just warns and never syncs (the warning
+  says as much).
+- **"No Notion token found" now calls out the `EnvironmentFile` gotcha.** Under systemd the
+  `environmentFile` must hold a literal `NOTION_TOKEN=ntn_...` line; a bare token with no
+  `NOTION_TOKEN=` is silently ignored and reads as this exact error even though you did
+  provide one. The message says so now.
+- **Non-code-block pages stop re-warning every poll.** Two paths logged the same warning
+  each cycle: discovery re-probed an untracked page split into non-code blocks (it shared
+  the `Skipped` outcome with empty pages, which are deliberately re-probed), and a pull
+  skipped a tracked split page whose local copy had also diverged without recording that it
+  had seen the remote edit. Discovery now separates "no body yet" (re-probe) from "foreign
+  blocks" (cache and warn once), and the diverged-pull path records the remote timestamp so
+  it warns once per remote change.
+
 ## [0.5.1] - 2026-06-10
 
 ### Added
@@ -205,6 +228,7 @@ All notable changes to this project are documented here. The format is based on
 - Initial one-way mirror (local -> Notion) with watcher, poller, reconcile, local-wins
   conflict handling, and the chunk fidelity probe.
 
+[0.5.2]: https://github.com/feltfomo/notion-sync/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/feltfomo/notion-sync/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/feltfomo/notion-sync/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/feltfomo/notion-sync/compare/v0.3.0...v0.4.0

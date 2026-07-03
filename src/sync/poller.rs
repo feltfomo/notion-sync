@@ -236,11 +236,14 @@ async fn discover_untracked(
                 info!(page = %page_id, "poller discovered untracked Notion page");
                 created += 1;
             }
-            Ok(Discovery::NotPlaceable) => {
+            // Not ours, or split into non-code blocks (which won't repair itself): cache
+            // the id so later cycles stop re-probing AND stop re-warning. The one foreign
+            // warning is emitted by discover_remote_page, so caching here makes it fire once.
+            Ok(Discovery::NotPlaceable) | Ok(Discovery::SkippedForeign) => {
                 not_ours.insert(page_id.to_string());
             }
-            // AlreadyTracked / Skipped: don't cache -- a skipped page may gain a body, and
-            // a now-tracked one drops out of the candidate set on its own next cycle.
+            // AlreadyTracked / SkippedNoBody: don't cache -- an empty page may gain a body,
+            // and a now-tracked one drops out of the candidate set on its own next cycle.
             Ok(_) => {}
             Err(e) => warn!(page = %page_id, error = %e, "discovery probe failed"),
         }

@@ -31,9 +31,13 @@ pub async fn resolve_pull(engine: &Engine, node: &Node) -> anyhow_lite::Result {
                 "notion page split into non-code blocks; re-pushing local to repair");
             return engine.force_push_locked(&node.rel_path).await;
         }
+        // Local ALSO diverged, so we can't repair from local and we won't overwrite it:
+        // there's nothing to do but wait for a human. Record the current remote last-edit
+        // so this warns once per remote change, not once per poll -- the poller's timestamp
+        // fast-path then skips the page until Notion actually changes again.
         warn!(rel_path = %node.rel_path, foreign = body.foreign_blocks,
             "notion page split AND local diverged; skipping pull, manual fix required");
-        return Ok(());
+        return mark_remote_seen(engine, node).await;
     }
 
     let notion_content = body.text;
@@ -112,6 +116,25 @@ pub async fn resolve_pull(engine: &Engine, node: &Node) -> anyhow_lite::Result {
     // already hold this path's lock via pull_page, so sync_file would deadlock
     // re-locking the same mutex; a full rebuild also clears any stray blocks.
     engine.force_push_locked(&node.rel_path).await
+}
+
+/// Record a page's current remote last-edit time without touching content or disk. Used
+/// when we deliberately leave a page alone (a split mirror where local also diverged, so
+/// neither side can win automatically): without this the page looks changed on every poll
+/// and re-warns each cycle. Bumping the stored timestamp means we re-warn only when Notion
+/// changes again. Best-effort; a fetch failure just means we re-evaluate next poll.
+async fn mark_remote_seen(engine: &Engine, node: &Node) -> anyhow_lite::Result {
+    let last = engine
+        .api
+        .get_page(&node.notion_page_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .last_edited_time;
+    let mut updated = node.clone();
+    updated.notion_last_edited = Some(last);
+    let st = engine.state.lock().await;
+    st.upsert(&updated).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 async fn refresh_after_pull(engine: &Engine, node: &Node, hash: &str) -> anyhow_lite::Result {

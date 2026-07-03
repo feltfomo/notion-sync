@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 
 use serde::Deserialize;
+use tracing::warn;
 
 #[derive(Debug, Deserialize)]
 pub struct RawConfig {
@@ -244,15 +245,18 @@ impl Config {
                     "duplicate mapping name {name:?}; mapping names must be unique"
                 )));
             }
-            // Each mapping is independently guarded against the empty/missing-tree
-            // mass-delete footgun at reconcile time, but reject an outright
-            // non-directory here so a typo fails fast instead of silently skipping a
-            // mapping on every pass.
+            // A missing/unreadable root used to be a hard error here, to fail fast on a
+            // typo'd path. But on a late-mount or impermanence host (skadi) a root that
+            // isn't there *yet* at boot turned that fail-fast into a systemd crash-loop.
+            // So warn and keep the mapping instead: reconcile, the poller health-check,
+            // and the watcher each already skip a missing root per mapping, and keeping it
+            // in the config means the CLI subcommands can still resolve its paths.
             if !rm.local_root.is_dir() {
-                return Err(ConfigError::Invalid(format!(
-                    "local_root for mapping {name:?} is not a directory: {}",
-                    rm.local_root.display()
-                )));
+                warn!(
+                    mapping = %name,
+                    root = %rm.local_root.display(),
+                    "local_root is missing or not a directory; keeping the mapping, but it won't sync until the path exists (typo, unmounted volume, or a dir that isn't created yet?)"
+                );
             }
             // Per-directory overrides live in <local_root>/.notion-sync.toml. Optional:
             // a mapping with no such file is exactly the old central-only behavior.
@@ -492,9 +496,12 @@ pub fn load_token(token_file: Option<&std::path::Path>) -> Result<String, Config
         return Ok(tok);
     }
     Err(ConfigError::Invalid(
-        "No Notion token found. Set $NOTION_TOKEN (or `token_file` in config): create an \
-         integration at https://www.notion.so/my-integrations, share the parent page with \
-         it, export the token (export NOTION_TOKEN=ntn_...), then see the README Quickstart."
+        "No Notion token found. Set $NOTION_TOKEN, or point `token_file` in the config at \
+         a file holding the raw token. Under systemd (the NixOS module's `environmentFile`) \
+         that file must contain a literal `NOTION_TOKEN=ntn_...` line: systemd silently \
+         ignores a bare token with no `NOTION_TOKEN=`, which surfaces as this exact error \
+         even though you did set one. First run? Create an integration at https://www.notion.so/my-integrations, \
+         share the parent page with it, then see the README Quickstart."
             .into(),
     ))
 }
