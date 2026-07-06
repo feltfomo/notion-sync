@@ -45,11 +45,16 @@ pub struct Engine {
 /// A page body read back from Notion. `foreign_blocks` counts children that are
 /// neither code blocks nor nested subpages; their presence means the single
 /// code-block mirror was split apart (e.g. a structured edit of a file that carries
-/// its own code fences), so `text` is an incomplete reassembly and must not be
-/// trusted for a destructive disk write.
+/// its own code fences). `code_blocks` counts the code blocks that formed `text`; more
+/// than we last wrote means a botched overwrite left stale/duplicate blocks behind. In
+/// either case `text` is an untrustworthy reassembly and must not overwrite disk -- see
+/// `mirror_corrupted`.
 pub struct PageBody {
     pub text: String,
     pub foreign_blocks: usize,
+    /// How many code blocks made up this body. A faithful mirror has exactly the number
+    /// of code blocks we last wrote (tracked in `Node::body_block_ids`).
+    pub code_blocks: usize,
 }
 
 /// Reassemble a page's code-block runs into file bytes in document order, counting
@@ -58,10 +63,12 @@ pub struct PageBody {
 fn reassemble_page_body(blocks: Vec<BlockResp>) -> PageBody {
     let mut text = String::new();
     let mut foreign_blocks = 0usize;
+    let mut code_blocks = 0usize;
     for b in blocks {
         let BlockResp { ty, code, .. } = b;
         match ty.as_str() {
             "code" => {
+                code_blocks += 1;
                 if let Some(code) = code {
                     for run in code.rich_text {
                         text.push_str(&run.plain_text);
@@ -75,7 +82,22 @@ fn reassemble_page_body(blocks: Vec<BlockResp>) -> PageBody {
     PageBody {
         text,
         foreign_blocks,
+        code_blocks,
     }
+}
+
+/// True if a page body read back from Notion is no longer a faithful mirror of the local
+/// file. Two failure modes corrupt it:
+///   * a structured editor split it into non-code blocks (`foreign_blocks > 0`) -- e.g. a
+///     `.md` file whose own code fences were parsed as real fences; `text` is truncated.
+///   * a botched overwrite left more code blocks than we tracked (the append landed but
+///     the trash of the old blocks failed) -- the doubling loop; `text` is duplicated.
+/// In either case `text` must not overwrite disk; the caller repairs from local instead.
+/// `tracked_blocks` is how many body blocks we last wrote (`Node::body_block_ids.len()`);
+/// 0 means "no baseline yet", so we flag only foreign blocks and leave the duplicate
+/// check to a later sync that establishes the baseline.
+pub fn mirror_corrupted(body: &PageBody, tracked_blocks: usize) -> bool {
+    body.foreign_blocks > 0 || (tracked_blocks > 0 && body.code_blocks > tracked_blocks)
 }
 
 /// Outcome of a discovery probe, so the poller can tell "foreign page, stop asking"
@@ -754,13 +776,14 @@ impl Engine {
 
     /// True if `node`'s current remote body still hashes to exactly what we last synced.
     /// This is the content half of echo suppression: an edit attributed to our bot is a
-    /// real echo of our own write only if the body still matches. A page with foreign
-    /// blocks (a split mirror) or one we can't read is never an echo, so it falls through
-    /// to be pulled or repaired. The caller owns the bot-attribution check, since the
-    /// poller reads it from `last_edited_by` and the webhook worker from event `authors`.
+    /// real echo of our own write only if the body still matches. A corrupted mirror (a
+    /// split page with foreign blocks, or one with stale/duplicate code blocks) or a page
+    /// we can't read is never an echo, so it falls through to be pulled or repaired. The
+    /// caller owns the bot-attribution check, since the poller reads it from
+    /// `last_edited_by` and the webhook worker from event `authors`.
     pub async fn remote_body_matches_last_sync(&self, node: &Node) -> bool {
         match self.read_page_body(node).await {
-            Ok(body) if body.foreign_blocks == 0 => {
+            Ok(body) if !mirror_corrupted(&body, node.body_block_ids.len()) => {
                 node.content_hash.as_deref() == Some(hashutil::hash_str(&body.text).as_str())
             }
             _ => false,
@@ -978,9 +1001,11 @@ pub mod anyhow_lite {
 
 #[cfg(test)]
 mod tests {
+    use super::mirror_corrupted;
     use super::normalize_page_id;
     use super::reassemble_page_body;
     use super::sanitize_segment;
+    use super::PageBody;
     use crate::api::models::BlockResp;
 
     #[test]
@@ -1028,6 +1053,7 @@ mod tests {
         let body = reassemble_page_body(blocks);
         assert_eq!(body.text, "fn main() {\n\tok();\n}\n");
         assert_eq!(body.foreign_blocks, 1);
+        assert_eq!(body.code_blocks, 2);
     }
 
     #[test]
@@ -1035,5 +1061,24 @@ mod tests {
         let body = reassemble_page_body(blocks_from(serde_json::json!([])));
         assert_eq!(body.text, "");
         assert_eq!(body.foreign_blocks, 0);
+        assert_eq!(body.code_blocks, 0);
+    }
+
+    #[test]
+    fn mirror_corrupted_flags_split_and_duplicated_bodies() {
+        // Clean mirror: exactly the tracked number of code blocks, none foreign.
+        let clean = PageBody { text: "x".into(), foreign_blocks: 0, code_blocks: 2 };
+        assert!(!mirror_corrupted(&clean, 2));
+        // Split: a structured edit introduced non-code blocks.
+        let split = PageBody { text: "x".into(), foreign_blocks: 1, code_blocks: 2 };
+        assert!(mirror_corrupted(&split, 2));
+        // Doubled: a botched overwrite left stale code blocks (the .md bounce loop).
+        let doubled = PageBody { text: "xx".into(), foreign_blocks: 0, code_blocks: 4 };
+        assert!(mirror_corrupted(&doubled, 2));
+        // No baseline yet (0 tracked): don't flag extra code blocks, only foreign ones.
+        assert!(!mirror_corrupted(&doubled, 0));
+        let split_no_baseline =
+            PageBody { text: "x".into(), foreign_blocks: 1, code_blocks: 1 };
+        assert!(mirror_corrupted(&split_no_baseline, 0));
     }
 }

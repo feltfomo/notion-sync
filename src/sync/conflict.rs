@@ -5,7 +5,7 @@
 
 use tracing::{info, warn};
 
-use super::engine::{anyhow_lite, Engine};
+use super::engine::{anyhow_lite, mirror_corrupted, Engine};
 use super::util;
 use crate::hashutil;
 use crate::state::Node;
@@ -22,13 +22,19 @@ pub async fn resolve_pull(engine: &Engine, node: &Node) -> anyhow_lite::Result {
 
     let body = engine.read_page_body(node).await?;
 
-    // A faithful mirror is pure code blocks. Foreign blocks mean a structured editor
-    // split it (e.g. a .md file's own code fences parsed as real fences), so body.text
-    // is a truncated reassembly. Never let that overwrite disk; repair from local.
-    if body.foreign_blocks > 0 {
+    // A faithful mirror is exactly the code blocks we last wrote. Two failure modes
+    // corrupt it: a structured editor splits it into non-code blocks (a .md file's own
+    // fences parsed as real fences), so body.text is truncated; or a botched overwrite
+    // leaves stale/duplicate code blocks behind (the append landed but trash-old failed),
+    // so body.text is a duplicated reassembly. Counting only foreign blocks missed the
+    // duplicate case -- duplicate code blocks read back as 0 foreign -- which is why a
+    // doubled .md kept bouncing: it never looked "split", so it was pulled onto disk as
+    // an external edit instead of repaired. Treat both as corruption; repair from local.
+    if mirror_corrupted(&body, node.body_block_ids.len()) {
         if local_unchanged {
             warn!(rel_path = %node.rel_path, foreign = body.foreign_blocks,
-                "notion page split into non-code blocks; re-pushing local to repair");
+                code_blocks = body.code_blocks, tracked = node.body_block_ids.len(),
+                "notion mirror corrupted (split or duplicated blocks); re-pushing local to repair");
             return engine.force_push_locked(&node.rel_path).await;
         }
         // Local ALSO diverged, so we can't repair from local and we won't overwrite it:
@@ -36,7 +42,8 @@ pub async fn resolve_pull(engine: &Engine, node: &Node) -> anyhow_lite::Result {
         // so this warns once per remote change, not once per poll -- the poller's timestamp
         // fast-path then skips the page until Notion actually changes again.
         warn!(rel_path = %node.rel_path, foreign = body.foreign_blocks,
-            "notion page split AND local diverged; skipping pull, manual fix required");
+            code_blocks = body.code_blocks, tracked = node.body_block_ids.len(),
+            "notion mirror corrupted AND local diverged; skipping pull, manual fix required");
         return mark_remote_seen(engine, node).await;
     }
 
