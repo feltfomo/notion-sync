@@ -73,6 +73,79 @@ in
     '';
   };
 
+  # `keepWarm`: an optional systemd timer that periodically pokes the public
+  # webhook URL so a relay-based tunnel's edge<->node link never goes idle. Notion
+  # delivers each event one-shot, and some tunnels -- Tailscale Funnel most visibly
+  # -- let an idle ingress go cold: the first request after the idle window 502s
+  # while the relay reconnects, then works. That silently drops the event (the
+  # poller re-pulls it a cycle later) and, worse, fails subscription verification,
+  # which is itself a single one-shot POST. Off by default; a cloudflared named
+  # tunnel holds the connection open and never needs it.
+  keepWarmOptions = {
+    keepWarm = {
+      enable = lib.mkEnableOption ''
+        a periodic keep-warm ping of the public webhook URL, for relay-based
+        tunnels (e.g. Tailscale Funnel) whose ingress goes cold when idle'';
+
+      url = lib.mkOption {
+        type = lib.types.str;
+        example = "https://host.tailnet.ts.net/notion-webhook";
+        description = ''
+          Public webhook URL to poke -- the exact URL the subscription points at.
+          A plain GET is enough: the receiver 404s it on method and the round trip
+          is all that keeps the tunnel warm.
+        '';
+      };
+
+      interval = lib.mkOption {
+        type = lib.types.str;
+        default = "45s";
+        description = ''
+          systemd OnUnitActiveSec between pings. Keep it under the tunnel's idle
+          window; Tailscale's is short, so 45s is the safe default.
+        '';
+      };
+
+      forcePublicPath = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Force the ping across the public relay instead of a local shortcut.
+          Tailscale Funnel needs this: a request from the node itself takes the
+          direct tailnet path and never crosses the ingress, so it can't warm it.
+          When set, the URL's host is resolved against `resolver` (a PUBLIC DNS
+          server -- MagicDNS would hand back the 100.x tailnet IP) and each edge
+          IP is hit with `curl --resolve`. Leave false for a tunnel that doesn't
+          shortcut (cloudflared), where a plain curl already crosses the edge.
+        '';
+      };
+
+      resolver = lib.mkOption {
+        type = lib.types.str;
+        default = "1.1.1.1";
+        description = "Public DNS resolver used when `forcePublicPath` is set.";
+      };
+    };
+  };
+
+  # Keep-warm shell script for a resolved `keepWarm` submodule. Shared so the NixOS
+  # system timer and any future home-manager user timer render identical behavior.
+  keepWarmScript = kw:
+    if kw.forcePublicPath then ''
+      url=${lib.escapeShellArg kw.url}
+      host=$(printf '%s' "$url" | sed -E 's#^[a-z]+://([^/:]+).*#\1#')
+      relays=$(dig +short @${kw.resolver} "$host" A)
+      if [ -z "$relays" ]; then
+        echo "notion-sync keep-warm: no public IPs for $host; skipping"
+        exit 0
+      fi
+      for ip in $relays; do
+        curl -sS -o /dev/null --max-time 10 --resolve "$host:443:$ip" "$url" || true
+      done
+    '' else ''
+      curl -sS -o /dev/null --max-time 10 ${lib.escapeShellArg kw.url} || true
+    '';
+
   # Shared CLI/log knobs. Spread into each module's option set with `//`.
   logOptions = {
     color = lib.mkOption {

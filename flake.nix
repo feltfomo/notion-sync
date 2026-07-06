@@ -28,7 +28,7 @@
       {
         packages.default = pkgs.rustPlatform.buildRustPackage {
           pname = "notion-sync";
-          version = "0.5.2";
+          version = "0.6.0";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
 

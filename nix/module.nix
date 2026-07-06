@@ -58,7 +58,7 @@ in
         MUST NOT be a nix store path (the store is world-readable).
       '';
     };
-  } // helpers.logOptions;
+  } // helpers.logOptions // helpers.keepWarmOptions;
 
   config = lib.mkIf cfg.enable {
     assertions = [
@@ -91,6 +91,34 @@ in
         NoNewPrivileges = true;
         ProtectKernelTunables = true;
         ProtectControlGroups = true;
+      };
+    };
+
+    # Keep-warm: a system oneshot + timer that pokes the public webhook URL so a
+    # relay tunnel's ingress never goes cold and drops Notion's one-shot delivery.
+    # A system service (not user) with DynamicUser: it only curls a public URL, so
+    # it needs neither the login session nor the user's files, and staying off the
+    # user manager means lingering can't gate it.
+    systemd.services.notion-sync-keepwarm = lib.mkIf cfg.keepWarm.enable {
+      description = "Keep the notion-sync webhook tunnel warm";
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      path = [ pkgs.curl ]
+        ++ lib.optionals cfg.keepWarm.forcePublicPath [ pkgs.dnsutils pkgs.gnused ];
+      serviceConfig = {
+        Type = "oneshot";
+        DynamicUser = true;
+      };
+      script = helpers.keepWarmScript cfg.keepWarm;
+    };
+
+    systemd.timers.notion-sync-keepwarm = lib.mkIf cfg.keepWarm.enable {
+      description = "Periodic keep-warm ping for the notion-sync webhook tunnel";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnBootSec = "1min";
+        OnUnitActiveSec = cfg.keepWarm.interval;
+        AccuracySec = "5s";
       };
     };
 

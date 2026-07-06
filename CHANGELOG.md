@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-07-06
+
+### Added
+- **`keepWarm` Nix option for relay tunnels.** Tailscale Funnel's ingress goes cold when
+  idle: the first request after a quiet stretch 502s while the relay reconnects, which
+  silently drops Notion's one-shot webhook delivery (the poller re-pulls it a cycle later)
+  and, worse, fails subscription verification, itself a single one-shot POST. The NixOS
+  module gained `services.notion-sync.keepWarm` -- an off-by-default system timer that pings
+  the public webhook URL on an interval (`45s` default) so the ingress never idles out. Set
+  `forcePublicPath = true` for Funnel: a curl from the node takes the direct tailnet path
+  and never crosses the ingress, so the timer resolves the funnel name against a public DNS
+  resolver (MagicDNS returns the tailnet IP) and hits the edge with `curl --resolve`. Leave
+  it off for a cloudflared named tunnel, which holds the connection open. README's "Picking
+  a tunnel" documents the failure mode. We hit this deploying against Funnel; the daemon
+  needs no change (delivery was already best-effort with a poller fallback), so this is
+  deployment glue and lives in the module, not the binary.
+
 ## [0.5.0] - 2026-06-09
 
 ### Added
@@ -228,6 +245,7 @@ All notable changes to this project are documented here. The format is based on
 - Initial one-way mirror (local -> Notion) with watcher, poller, reconcile, local-wins
   conflict handling, and the chunk fidelity probe.
 
+[0.6.0]: https://github.com/feltfomo/notion-sync/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/feltfomo/notion-sync/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/feltfomo/notion-sync/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/feltfomo/notion-sync/compare/v0.4.0...v0.5.0
