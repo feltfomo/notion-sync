@@ -1067,18 +1067,33 @@ mod tests {
     #[test]
     fn mirror_corrupted_flags_split_and_duplicated_bodies() {
         // Clean mirror: exactly the tracked number of code blocks, none foreign.
-        let clean = PageBody { text: "x".into(), foreign_blocks: 0, code_blocks: 2 };
+        let clean = PageBody {
+            text: "x".into(),
+            foreign_blocks: 0,
+            code_blocks: 2,
+        };
         assert!(!mirror_corrupted(&clean, 2));
         // Split: a structured edit introduced non-code blocks.
-        let split = PageBody { text: "x".into(), foreign_blocks: 1, code_blocks: 2 };
+        let split = PageBody {
+            text: "x".into(),
+            foreign_blocks: 1,
+            code_blocks: 2,
+        };
         assert!(mirror_corrupted(&split, 2));
         // Doubled: a botched overwrite left stale code blocks (the .md bounce loop).
-        let doubled = PageBody { text: "xx".into(), foreign_blocks: 0, code_blocks: 4 };
+        let doubled = PageBody {
+            text: "xx".into(),
+            foreign_blocks: 0,
+            code_blocks: 4,
+        };
         assert!(mirror_corrupted(&doubled, 2));
         // No baseline yet (0 tracked): don't flag extra code blocks, only foreign ones.
         assert!(!mirror_corrupted(&doubled, 0));
-        let split_no_baseline =
-            PageBody { text: "x".into(), foreign_blocks: 1, code_blocks: 1 };
+        let split_no_baseline = PageBody {
+            text: "x".into(),
+            foreign_blocks: 1,
+            code_blocks: 1,
+        };
         assert!(mirror_corrupted(&split_no_baseline, 0));
     }
 }
