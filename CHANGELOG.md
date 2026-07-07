@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-07-06
+
+### Fixed
+- **A duplicated `.md` mirror no longer bounces onto disk and clobbers local.** The
+  pull path judged a mirror "faithful" only by counting non-code *foreign* blocks, so a
+  page whose body had been duplicated into extra **code** blocks (a botched overwrite
+  where the append landed but trashing the old blocks failed) read back as zero foreign
+  blocks and was mistaken for a legitimate external edit -- pulled straight onto disk,
+  overwriting the local source of truth, then re-pushed, looping. Files that carry their
+  own code fences (`.md`, chiefly READMEs) triggered it; `.rs`/`.nix` mirrors, which stay
+  a single faithful block, never did. The mirror-integrity check now also flags more code
+  blocks than were last written (`code_blocks > tracked`), and both the webhook/poller
+  echo guard and the pull resolver treat that as a corrupted mirror: instead of pulling,
+  they repair from local via `force_push`, which deletes every child block and rebuilds a
+  single clean copy -- so the stale block is swept and the loop converges in one cycle.
+
 ## [0.6.0] - 2026-07-06
 
 ### Added
@@ -245,6 +261,7 @@ All notable changes to this project are documented here. The format is based on
 - Initial one-way mirror (local -> Notion) with watcher, poller, reconcile, local-wins
   conflict handling, and the chunk fidelity probe.
 
+[0.6.1]: https://github.com/feltfomo/notion-sync/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/feltfomo/notion-sync/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/feltfomo/notion-sync/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/feltfomo/notion-sync/compare/v0.5.0...v0.5.1
