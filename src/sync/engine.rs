@@ -92,7 +92,9 @@ fn reassemble_page_body(blocks: Vec<BlockResp>) -> PageBody {
 ///     `.md` file whose own code fences were parsed as real fences; `text` is truncated.
 ///   * a botched overwrite left more code blocks than we tracked (the append landed but
 ///     the trash of the old blocks failed) -- the doubling loop; `text` is duplicated.
+///
 /// In either case `text` must not overwrite disk; the caller repairs from local instead.
+///
 /// `tracked_blocks` is how many body blocks we last wrote (`Node::body_block_ids.len()`);
 /// 0 means "no baseline yet", so we flag only foreign blocks and leave the duplicate
 /// check to a later sync that establishes the baseline.
