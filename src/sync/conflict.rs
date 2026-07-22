@@ -20,7 +20,7 @@ pub async fn resolve_pull(engine: &Engine, node: &Node) -> anyhow_lite::Result {
     let local_hash = hashutil::hash_bytes(&local_bytes);
     let local_unchanged = node.content_hash.as_deref() == Some(local_hash.as_str());
 
-    let body = engine.read_page_body(node).await?;
+    let (body, live_code_ids) = engine.read_body_and_code_ids(node).await?;
 
     // A faithful mirror is exactly the code blocks we last wrote. Two failure modes
     // corrupt it: a structured editor splits it into non-code blocks (a .md file's own
@@ -52,7 +52,7 @@ pub async fn resolve_pull(engine: &Engine, node: &Node) -> anyhow_lite::Result {
 
     if notion_hash == local_hash {
         // Notion now matches disk: nothing to write, just refresh bookkeeping.
-        return refresh_after_pull(engine, node, &local_hash).await;
+        return refresh_after_pull(engine, node, &local_hash, &live_code_ids).await;
     }
 
     if local_unchanged {
@@ -84,7 +84,7 @@ pub async fn resolve_pull(engine: &Engine, node: &Node) -> anyhow_lite::Result {
                 "from_notion",
             )
             .await;
-        return refresh_after_pull(engine, node, &notion_hash).await;
+        return refresh_after_pull(engine, node, &notion_hash, &live_code_ids).await;
     }
 
     // True conflict: local changed AND Notion changed. Local wins.
@@ -144,7 +144,12 @@ async fn mark_remote_seen(engine: &Engine, node: &Node) -> anyhow_lite::Result {
     Ok(())
 }
 
-async fn refresh_after_pull(engine: &Engine, node: &Node, hash: &str) -> anyhow_lite::Result {
+async fn refresh_after_pull(
+    engine: &Engine,
+    node: &Node,
+    hash: &str,
+    body_block_ids: &[String],
+) -> anyhow_lite::Result {
     let last = engine
         .api
         .get_page(&node.notion_page_id)
@@ -156,6 +161,12 @@ async fn refresh_after_pull(engine: &Engine, node: &Node, hash: &str) -> anyhow_
     updated.notion_last_edited = Some(last);
     updated.local_mtime_ns = util::file_mtime_ns(&engine.abs_path(&node.rel_path));
     updated.last_synced_dir = Some("from_notion".into());
+    // Refresh the tracked body-block ids to the page's live code blocks. Skipping this is
+    // what let the doubled-fence bug survive: a pulled external edit (e.g. spw) left the
+    // pre-pull ids in state, so the next push trashed ids that were already gone and
+    // stranded the real blocks. Keeping them current is what makes a later overwrite
+    // actually replace the body.
+    updated.body_block_ids = body_block_ids.to_vec();
     let st = engine.state.lock().await;
     st.upsert(&updated).map_err(|e| e.to_string())?;
     Ok(())

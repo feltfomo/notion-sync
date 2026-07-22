@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-07-21
+
+### Fixed
+- **A local->Notion push no longer leaves the page with two stacked code fences.** The
+  overwrite path appended the fresh body and then trashed `Node::body_block_ids` -- the
+  block ids recorded by the *last push*. A pull in between (e.g. an spw edit reflected
+  back through the host->Notion coherence write-back) rewrites the page's live blocks
+  without refreshing that tracked list, so the ids we trashed were already gone and the
+  real, current block survived beside the newly appended one: one canonical fence became
+  two, and a later read-back saw it as a duplicated / `foreign_block` mirror. The push now
+  reads the page's *live* code-block ids in the same pass as the pre-push snapshot and
+  trashes those; the pull path refreshes `body_block_ids` so the tracked list can't go
+  stale in the first place. The binary/oversized placeholder path (`ensure_placeholder`)
+  carried the same append-then-trash-tracked-ids shape and got the same fix. This retires
+  the "Duplicated page body on push" known issue, whose suspected flaky trash-after-append
+  was a symptom of the stale-id trap, not a dropped delete.
+
 ## [0.6.1] - 2026-07-06
 
 ### Fixed
@@ -261,6 +278,7 @@ All notable changes to this project are documented here. The format is based on
 - Initial one-way mirror (local -> Notion) with watcher, poller, reconcile, local-wins
   conflict handling, and the chunk fidelity probe.
 
+[0.6.2]: https://github.com/feltfomo/notion-sync/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/feltfomo/notion-sync/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/feltfomo/notion-sync/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/feltfomo/notion-sync/compare/v0.5.1...v0.5.2

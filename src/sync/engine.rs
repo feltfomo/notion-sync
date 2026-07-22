@@ -86,6 +86,19 @@ fn reassemble_page_body(blocks: Vec<BlockResp>) -> PageBody {
     }
 }
 
+/// The body blocks a push must trash: the page's *live* code blocks in document order.
+/// Deliberately NOT `Node::body_block_ids` -- a pull (e.g. an spw edit) rewrites the live
+/// blocks without refreshing that tracked list, so trusting it trashes ids that are
+/// already gone and leaves the real blocks behind as a second stacked fence. Split out so
+/// the overwrite path's block selection is unit-testable without a live Notion API.
+fn live_code_block_ids(blocks: &[BlockResp]) -> Vec<String> {
+    blocks
+        .iter()
+        .filter(|b| b.ty == "code")
+        .map(|b| b.id.clone())
+        .collect()
+}
+
 /// True if a page body read back from Notion is no longer a faithful mirror of the local
 /// file. Two failure modes corrupt it:
 ///   * a structured editor split it into non-code blocks (`foreign_blocks > 0`) -- e.g. a
@@ -443,37 +456,43 @@ impl Engine {
             }
             Ok(_) => {}
         }
-        // Pre-push backup: save the current Notion body before overwriting it, so a bad
-        // local edit that clobbers good remote content stays recoverable. Best-effort:
-        // a capture failure never blocks the push.
-        let prev_hash = match self.read_page_body(node).await {
-            Ok(body) => {
-                self.capture(
-                    rel_path,
-                    Some(&node.notion_page_id),
-                    "notion",
-                    "pre-push",
-                    body.text.into_bytes(),
-                )
-                .await
+        // Pre-push backup + live-block read in one pass: save the current Notion body so a
+        // bad local edit that clobbers good remote content stays recoverable, and capture
+        // the ids of the blocks actually on the page right now. Best-effort: a read/capture
+        // failure never blocks the push, and falls back to the tracked ids.
+        let (live_code_ids, prev_hash) = match self.read_body_and_code_ids(node).await {
+            Ok((body, ids)) => {
+                let hash = self
+                    .capture(
+                        rel_path,
+                        Some(&node.notion_page_id),
+                        "notion",
+                        "pre-push",
+                        body.text.into_bytes(),
+                    )
+                    .await;
+                (ids, hash)
             }
             Err(e) => {
                 warn!(rel_path, error = %e, "could not read remote body for pre-push snapshot; continuing");
-                None
+                (node.body_block_ids.clone(), None)
             }
         };
         // Append the fresh body BEFORE trashing the old blocks. If we deleted first and
-        // the append failed, the page would be left blank with the content gone.
-        // Appending first leaves the old body intact on failure; the worst case is a
-        // transient duplicate the next sync cleans up.
+        // the append failed, the page would be left blank with the content gone; appending
+        // first leaves the old body intact on failure, and local disk is the source of
+        // truth so a re-push recovers.
         //
-        // Only the tracked body blocks are trashed, not arbitrary children: human-added
-        // foreign blocks survive a plain push and are cleaned by the force_push rebuild
-        // in resolve_pull on the next pull.
+        // Trash the blocks that were LIVE before this append -- the code blocks we just
+        // read off the page -- not `node.body_block_ids`. That tracked list goes stale the
+        // moment a pull (e.g. an spw edit) rewrites the live blocks without updating it, so
+        // trashing it deletes ids that are already gone and strands the real blocks as a
+        // second stacked fence. Foreign (human-added) blocks are still left alone; the
+        // pull-side repair rebuilds those.
         let block_ids = self
             .append_body(&node.notion_page_id, content, rel_path)
             .await?;
-        for id in &node.body_block_ids {
+        for id in &live_code_ids {
             if let Err(e) = self.api.delete_block(id).await {
                 warn!(rel_path, block = %id, error = %e, "failed to trash old block; continuing");
             }
@@ -691,14 +710,24 @@ impl Engine {
         if let Some(node) = existing {
             match self.api.get_page(&node.notion_page_id).await {
                 Ok(page) if !page.trashed() => {
-                    // Append the placeholder callout first, then clear the old body
-                    // (same append-before-delete safety as overwrite_body).
+                    // Clear whatever body is actually on the page, not the tracked ids: a
+                    // pull (e.g. an spw edit) leaves `body_block_ids` stale, so trashing it
+                    // would strand the real code block next to the new callout -- the same
+                    // doubling bug overwrite_body had. Read the live code blocks, append the
+                    // callout, then trash the blocks that were live before it.
+                    let live_code_ids = match self.read_body_and_code_ids(&node).await {
+                        Ok((_, ids)) => ids,
+                        Err(e) => {
+                            warn!(rel_path, error = %e, "could not read live blocks for placeholder; falling back to tracked ids");
+                            node.body_block_ids.clone()
+                        }
+                    };
                     let new_ids = self
                         .api
                         .append_children(&node.notion_page_id, vec![callout])
                         .await
                         .map_err(|e| e.to_string())?;
-                    for id in &node.body_block_ids {
+                    for id in &live_code_ids {
                         if let Err(e) = self.api.delete_block(id).await {
                             warn!(rel_path, block = %id, error = %e, "failed to trash old block; continuing");
                         }
@@ -774,6 +803,23 @@ impl Engine {
             .await
             .map_err(|e| e.to_string())?;
         Ok(reassemble_page_body(blocks))
+    }
+
+    /// Read a page's children once and return both the reassembled body and the ids of
+    /// its live code blocks. The overwrite and pull paths both need the live block ids to
+    /// keep `Node::body_block_ids` honest; sharing one read avoids a second list call and
+    /// the stale-id trap of trusting the last push.
+    pub async fn read_body_and_code_ids(
+        &self,
+        node: &Node,
+    ) -> anyhow_lite::Result<(PageBody, Vec<String>)> {
+        let blocks = self
+            .api
+            .list_children(&node.notion_page_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let code_ids = live_code_block_ids(&blocks);
+        Ok((reassemble_page_body(blocks), code_ids))
     }
 
     /// True if `node`'s current remote body still hashes to exactly what we last synced.
@@ -1003,6 +1049,7 @@ pub mod anyhow_lite {
 
 #[cfg(test)]
 mod tests {
+    use super::live_code_block_ids;
     use super::mirror_corrupted;
     use super::normalize_page_id;
     use super::reassemble_page_body;
@@ -1097,5 +1144,54 @@ mod tests {
             code_blocks: 1,
         };
         assert!(mirror_corrupted(&split_no_baseline, 0));
+    }
+
+    #[test]
+    fn live_code_block_ids_selects_live_code_only() {
+        // The overwrite path must trash the code blocks actually on the page, skipping
+        // foreign (human-added) blocks and child-page subpages.
+        let blocks = blocks_from(serde_json::json!([
+            {"id": "S1", "type": "code", "last_edited_time": "t",
+             "code": {"rich_text": [{"plain_text": "x\n"}], "language": "rust"}},
+            {"id": "F1", "type": "paragraph", "last_edited_time": "t"},
+            {"id": "P1", "type": "child_page", "last_edited_time": "t", "child_page": {"title": "sub"}}
+        ]));
+        assert_eq!(live_code_block_ids(&blocks), vec!["S1".to_string()]);
+    }
+
+    #[test]
+    fn overwrite_trashes_live_ids_not_stale_tracked_ids() {
+        // The doubled-fence bug, reproduced purely. Model a page as its ordered code-block
+        // ids. An overwrite appends the new body block, then trashes a chosen set. After a
+        // pull (e.g. an spw edit) the live block is S1 but state still tracks the pre-pull
+        // id O1. Trashing the stale tracked set deletes O1 (already gone) and leaves S1 ->
+        // the body doubles. Trashing the live code ids targets S1, so the body stays single
+        // and a re-run is idempotent.
+        fn overwrite(page: &mut Vec<String>, new_id: &str, trash: &[String]) {
+            page.push(new_id.to_string());
+            page.retain(|id| !trash.contains(id));
+        }
+
+        // Old behavior: trashing tracked ids doubles the body.
+        let mut page_old = vec!["S1".to_string()];
+        overwrite(&mut page_old, "N1", &["O1".to_string()]);
+        assert_eq!(page_old, vec!["S1".to_string(), "N1".to_string()]);
+
+        // Fix: trash the live code ids read off the page.
+        let live = blocks_from(serde_json::json!([
+            {"id": "S1", "type": "code", "last_edited_time": "t",
+             "code": {"rich_text": [{"plain_text": "x"}], "language": "rust"}}
+        ]));
+        let mut page_new = vec!["S1".to_string()];
+        overwrite(&mut page_new, "N1", &live_code_block_ids(&live));
+        assert_eq!(page_new, vec!["N1".to_string()]);
+
+        // Idempotent: a second overwrite whose live id is now N1 doesn't grow the body.
+        let live2 = blocks_from(serde_json::json!([
+            {"id": "N1", "type": "code", "last_edited_time": "t",
+             "code": {"rich_text": [{"plain_text": "x"}], "language": "rust"}}
+        ]));
+        overwrite(&mut page_new, "N2", &live_code_block_ids(&live2));
+        assert_eq!(page_new, vec!["N2".to_string()]);
     }
 }
